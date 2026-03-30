@@ -101,25 +101,37 @@ size_t q3_rewrite_hostname(const uint8_t *data, size_t len,
         !(cmd_len == 12 && memcmp(cmd, "infoResponse", 12) == 0))
         return 0;
 
-    /* Search for the backslash-delimited key "\\sv_hostname\\" */
-    const char *needle = "\\sv_hostname\\";
-    size_t needle_len = strlen(needle);
+    /*
+     * Search for the hostname key in the info string.
+     *
+     * statusResponse packets dump raw cvars, so the key is "sv_hostname".
+     * infoResponse packets use a curated key list where the Q3 engine
+     * maps it to just "hostname".  Try the longer key first so we don't
+     * accidentally match a substring, then fall back to the shorter one.
+     */
+    const char *needles[] = { "\\sv_hostname\\", "\\hostname\\" };
+    const int num_needles = 2;
 
     const char *haystack = (const char *)data;
     const char *found = NULL;
+    size_t matched_needle_len = 0;
 
-    for (size_t i = 0; i + needle_len <= len; i++) {
-        if (memcmp(haystack + i, needle, needle_len) == 0) {
-            found = haystack + i;
-            break;
+    for (int ni = 0; ni < num_needles && !found; ni++) {
+        size_t needle_len = strlen(needles[ni]);
+        for (size_t i = 0; i + needle_len <= len; i++) {
+            if (memcmp(haystack + i, needles[ni], needle_len) == 0) {
+                found = haystack + i;
+                matched_needle_len = needle_len;
+                break;
+            }
         }
     }
 
     if (!found)
-        return 0;   /* sv_hostname key not present in this response */
+        return 0;   /* hostname key not present in this response */
 
     /* Locate the hostname value: starts right after the key */
-    const char *val_start = found + needle_len;
+    const char *val_start = found + matched_needle_len;
     size_t val_offset = (size_t)(val_start - haystack);
 
     /* Value ends at the next backslash (next key) or newline (player list) */
