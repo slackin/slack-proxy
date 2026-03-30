@@ -12,6 +12,8 @@
  *   6. Periodically sweeps and removes sessions that have been idle
  *      longer than the configured timeout.
  *   7. Rate-limits new session creation to prevent abuse.
+ *   8. Sends periodic heartbeat packets to master server(s) so the
+ *      proxy appears in the UrT server browser / master list.
  *
  * The loop exits cleanly on SIGINT or SIGTERM, closing all sockets and
  * freeing all allocated memory.
@@ -307,6 +309,42 @@ static void do_timeout_sweep(session_map_t *map, int epoll_fd, int timeout)
 }
 
 /* ================================================================== */
+/*  Master server heartbeat                                           */
+/* ================================================================== */
+
+/*
+ * send_heartbeats — Send a heartbeat packet to each configured master server.
+ *
+ * In the Q3 protocol, a game server registers itself with a master server
+ * by periodically sending:
+ *
+ *   \xFF\xFF\xFF\xFF heartbeat QuakeArena-1\n
+ *
+ * The master responds with a "getinfo" challenge, which arrives on the
+ * listen socket and is handled like any other client packet (forwarded
+ * to the real server, response relayed back with hostname rewriting).
+ * The master then records the proxy's IP:port in the server list.
+ *
+ * Heartbeats are sent from the listen socket so the master sees the
+ * proxy's public IP and listen port as the server address.
+ *
+ * @param listen_fd  The proxy's public-facing UDP socket.
+ * @param cfg        Relay configuration (contains master_addrs[]).
+ */
+static void send_heartbeats(int listen_fd, const relay_config_t *cfg)
+{
+    static const char pkt[] =
+        "\xFF\xFF\xFF\xFF" "heartbeat " Q3_HEARTBEAT_GAME "\n";
+
+    for (int i = 0; i < cfg->master_count; i++) {
+        sendto(listen_fd, pkt, sizeof(pkt) - 1, 0,
+               (struct sockaddr *)&cfg->master_addrs[i],
+               sizeof(cfg->master_addrs[i]));
+    }
+    log_info("Sent heartbeat to %d master server(s)", cfg->master_count);
+}
+
+/* ================================================================== */
 /*  Main event loop                                                   */
 /* ================================================================== */
 
@@ -323,6 +361,7 @@ static void do_timeout_sweep(session_map_t *map, int epoll_fd, int timeout)
  *         - listen_fd: receive client packet, find/create session, forward.
  *         - relay_fd:  receive server response, find session, relay back.
  *      c. Every SWEEP_INTERVAL seconds, sweep expired sessions.
+ *      d. Every Q3_HEARTBEAT_INTERVAL seconds, send heartbeats to masters.
  *   5. On shutdown: close every open socket, free the map.
  */
 int relay_run(const relay_config_t *cfg)
@@ -378,6 +417,12 @@ int relay_run(const relay_config_t *cfg)
     uint8_t rewrite_buf[RECV_BUF_SIZE];   /* Hostname-rewritten packet */
     struct epoll_event events[MAX_EPOLL_EVENTS];
     time_t last_sweep = time(NULL);
+
+    /*
+     * Heartbeat timer — initialised to 0 so the first heartbeat fires
+     * immediately on startup, then every Q3_HEARTBEAT_INTERVAL seconds.
+     */
+    time_t last_heartbeat = 0;
 
     /* ============================================================== */
     /*  Main event loop                                               */
@@ -531,6 +576,15 @@ int relay_run(const relay_config_t *cfg)
         if (now - last_sweep >= SWEEP_INTERVAL) {
             do_timeout_sweep(&sessions, epoll_fd, cfg->session_timeout);
             last_sweep = now;
+        }
+
+        /* ---------------------------------------------------------- */
+        /*  Periodic heartbeat to master server(s)                    */
+        /* ---------------------------------------------------------- */
+        if (cfg->master_count > 0 &&
+            now - last_heartbeat >= Q3_HEARTBEAT_INTERVAL) {
+            send_heartbeats(listen_fd, cfg);
+            last_heartbeat = now;
         }
     }
 

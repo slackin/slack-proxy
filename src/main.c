@@ -7,6 +7,7 @@
  */
 
 #include "relay.h"
+#include "q3proto.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -15,6 +16,7 @@
 #include <limits.h>
 #include <getopt.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 /* Default values for optional CLI arguments */
 #define DEFAULT_LISTEN_PORT   27960
@@ -45,14 +47,18 @@ static void usage(const char *prog)
         "  -t, --timeout SECS        Session timeout in seconds (default: %d)\n"
         "  -T, --hostname-tag TAG    Prefix for sv_hostname in browser (e.g. \"[PROXY]\")\n"
         "  -R, --rate-limit N        Max new sessions per second (default: %d)\n"
+        "  -M, --master-server HOST[:PORT]\n"
+        "                            Master server for server list registration\n"
+        "                            (port defaults to 27900, may be repeated up to %d)\n"
         "  -d, --debug               Enable debug logging\n"
         "  -h, --help                Show this help\n"
         "\n"
         "Example:\n"
-        "  %s -r 10.0.0.2 -l 27960 -p 27960 -T \"[PROXY]\"\n",
+        "  %s -r 10.0.0.2 -l 27960 -p 27960 -T \"[PROXY]\" -M master.urbanterror.info\n",
         prog,
         DEFAULT_LISTEN_PORT, DEFAULT_REMOTE_PORT,
         DEFAULT_MAX_CLIENTS, DEFAULT_TIMEOUT, DEFAULT_RATE_LIMIT,
+        RELAY_MAX_MASTERS,
         prog);
 }
 
@@ -78,6 +84,7 @@ int main(int argc, char **argv)
         {"timeout",      required_argument, NULL, 't'},
         {"hostname-tag", required_argument, NULL, 'T'},
         {"rate-limit",   required_argument, NULL, 'R'},
+        {"master-server",required_argument, NULL, 'M'},
         {"debug",        no_argument,       NULL, 'd'},
         {"help",         no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0}
@@ -85,7 +92,7 @@ int main(int argc, char **argv)
 
     /* --- Parse command-line arguments --- */
     int opt;
-    while ((opt = getopt_long(argc, argv, "r:l:p:m:t:T:R:dh", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "r:l:p:m:t:T:R:M:dh", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'r':   /* --remote-host (required) */
             remote_host = optarg;
@@ -120,6 +127,59 @@ int main(int argc, char **argv)
         case 'R':   /* --rate-limit: max new sessions per second */
             cfg.max_new_per_sec = (int)strtol(optarg, NULL, 10);
             break;
+        case 'M': { /* --master-server HOST[:PORT] — register with a master server */
+            if (cfg.master_count >= RELAY_MAX_MASTERS) {
+                fprintf(stderr, "Error: max %d master servers\n", RELAY_MAX_MASTERS);
+                return 1;
+            }
+
+            /* Split HOST and optional :PORT (default 27900) */
+            char host_buf[256];
+            uint16_t mport = Q3_DEFAULT_MASTER_PORT;
+
+            const char *colon = strrchr(optarg, ':');
+            if (colon) {
+                size_t hlen = (size_t)(colon - optarg);
+                if (hlen >= sizeof(host_buf)) {
+                    fprintf(stderr, "Error: master server hostname too long\n");
+                    return 1;
+                }
+                memcpy(host_buf, optarg, hlen);
+                host_buf[hlen] = '\0';
+                long p = strtol(colon + 1, NULL, 10);
+                if (p < 1 || p > 65535) {
+                    fprintf(stderr, "Error: invalid master server port\n");
+                    return 1;
+                }
+                mport = (uint16_t)p;
+            } else {
+                if (strlen(optarg) >= sizeof(host_buf)) {
+                    fprintf(stderr, "Error: master server hostname too long\n");
+                    return 1;
+                }
+                strncpy(host_buf, optarg, sizeof(host_buf) - 1);
+                host_buf[sizeof(host_buf) - 1] = '\0';
+            }
+
+            /* Resolve hostname (supports both IPs and DNS names) */
+            struct addrinfo hints = {0}, *res;
+            hints.ai_family   = AF_INET;
+            hints.ai_socktype = SOCK_DGRAM;
+
+            int gai_err = getaddrinfo(host_buf, NULL, &hints, &res);
+            if (gai_err != 0 || !res) {
+                fprintf(stderr, "Error: cannot resolve master server '%s': %s\n",
+                        host_buf, gai_strerror(gai_err));
+                return 1;
+            }
+
+            cfg.master_addrs[cfg.master_count] =
+                *(struct sockaddr_in *)res->ai_addr;
+            cfg.master_addrs[cfg.master_count].sin_port = htons(mport);
+            cfg.master_count++;
+            freeaddrinfo(res);
+            break;
+        }
         case 'd':   /* --debug: enable LOG_DEBUG output */
             debug = 1;
             break;
@@ -171,6 +231,17 @@ int main(int argc, char **argv)
     log_info("  Rate limit:     %d new/sec", cfg.max_new_per_sec);
     if (cfg.hostname_tag)
         log_info("  Hostname tag:   \"%s\"", cfg.hostname_tag);
+    if (cfg.master_count > 0) {
+        for (int i = 0; i < cfg.master_count; i++) {
+            char mstr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &cfg.master_addrs[i].sin_addr,
+                      mstr, sizeof(mstr));
+            log_info("  Master server:  %s:%u", mstr,
+                     ntohs(cfg.master_addrs[i].sin_port));
+        }
+    } else {
+        log_info("  Master server:  (none — not registering in server list)");
+    }
 
     /* Hand off to the blocking event loop — returns on shutdown or error */
     return relay_run(&cfg) == 0 ? 0 : 1;

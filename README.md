@@ -69,14 +69,16 @@ make clean
 | `-t, --timeout SECS` | 30 | Session inactivity timeout (≥ 5) |
 | `-T, --hostname-tag TAG` | *(none)* | Prefix added to `sv_hostname` in browser |
 | `-R, --rate-limit N` | 5 | Max new sessions per second (≥ 1) |
+| `-M, --master-server HOST[:PORT]` | *(none)* | Master server for server list registration (port defaults to 27900, may be repeated) |
 | `-d, --debug` | off | Enable debug-level logging |
 
 ### Example
 
 ```bash
 # Proxy on port 27960, forwarding to real server at 10.0.0.2:27960
-# with "[US-EAST]" prefix in the server browser
-./build/urt-proxy -r 10.0.0.2 -l 27960 -p 27960 -T "[US-EAST]"
+# with "[US-EAST]" prefix in the server browser, registered with master
+./build/urt-proxy -r 10.0.0.2 -l 27960 -p 27960 -T "[US-EAST]" \
+    -M master.urbanterror.info
 ```
 
 ## Log Output
@@ -91,9 +93,11 @@ All logs go to stderr with timestamps and severity levels:
 [2026-03-30 14:23:45] [INFO ]   Session timeout: 30s
 [2026-03-30 14:23:45] [INFO ]   Rate limit:     5 new/sec
 [2026-03-30 14:23:45] [INFO ]   Hostname tag:   "[US-EAST]"
+[2026-03-30 14:23:45] [INFO ]   Master server:  198.51.100.10:27900
 [2026-03-30 14:23:45] [INFO ] Listening on UDP port 27960
 [2026-03-30 14:23:45] [INFO ] Forwarding to 10.0.0.2:27960 via WireGuard
 [2026-03-30 14:23:45] [INFO ] Max clients: 20, session timeout: 30s
+[2026-03-30 14:23:45] [INFO ] Sent heartbeat to 1 master server(s)
 [2026-03-30 14:23:52] [INFO ] New session: 203.0.113.42:12345 (relay fd=5, total=1)
 [2026-03-30 14:24:22] [INFO ] Session expired: 203.0.113.42:12345 (pkts: 847/1203, bytes: 42350/96240)
 [2026-03-30 14:24:22] [INFO ] Swept 1 expired sessions, 0 active
@@ -109,6 +113,8 @@ Enable debug logging with `-d` for verbose packet-level diagnostics.
 - **Session hash map** — dual-index open-addressing table for O(1) lookup by
   client address or relay file descriptor
 - **Rate limiting** — simple 1-second sliding window caps new session creation
+- **Master server heartbeat** — periodic registration with UrT master server(s)
+  so the proxy appears in the server browser
 - **Graceful shutdown** — SIGINT/SIGTERM closes all sockets and frees resources
 
 ### Project Structure
@@ -150,6 +156,8 @@ WantedBy=multi-user.target
 | Problem | Cause | Fix |
 |---------|-------|-----|
 | `bind(:27960): Address already in use` | Another process is using the port | Stop the other process or use `-l` to pick a different port |
+| Server not appearing in master list | No master server configured | Add `-M master.urbanterror.info` to register with the UrT master |
+| `cannot resolve master server` | DNS lookup failed for master hostname | Check DNS, ensure the hostname is correct and resolvable |
 | `connect() relay socket: Network is unreachable` | WireGuard tunnel is not up | Bring up the tunnel (`wg-quick up wg0`) and verify the remote IP is reachable |
 | `Rate limit: dropping new client` | Too many new connections per second | Increase `-R` or investigate a possible flood |
 | `Max clients reached, dropping new connection` | Session pool is full | Increase `-m` or decrease `-t` to expire idle sessions faster |

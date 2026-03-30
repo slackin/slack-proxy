@@ -12,6 +12,9 @@
 #include <stdint.h>
 #include <netinet/in.h>
 
+/* Maximum number of master servers the proxy can register with. */
+#define RELAY_MAX_MASTERS 4
+
 /*
  * relay_config_t — Runtime configuration for the relay proxy.
  *
@@ -30,6 +33,10 @@ typedef struct {
 
     /* --- Rate limiting --- */
     int                 max_new_per_sec; /* Max new sessions created per second (>= 1) */
+
+    /* --- Master server registration --- */
+    struct sockaddr_in  master_addrs[RELAY_MAX_MASTERS]; /* Resolved master server addresses */
+    int                 master_count;    /* Number of configured masters (0 = no registration) */
 } relay_config_t;
 
 /*

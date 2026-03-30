@@ -31,6 +31,17 @@
 #define Q3_MAX_PACKET_SIZE 16384
 
 /*
+ * Heartbeat protocol constants.
+ *
+ * Q3/UrT servers register with master servers by sending periodic
+ * heartbeat packets.  The master responds with a getinfo challenge,
+ * and the server's infoResponse confirms the listing.
+ */
+#define Q3_HEARTBEAT_GAME      "QuakeArena-1"  /* Game identifier in heartbeat */
+#define Q3_HEARTBEAT_INTERVAL  300              /* Seconds between heartbeats   */
+#define Q3_DEFAULT_MASTER_PORT 27900            /* Standard master server port  */
+
+/*
  * q3_is_connectionless — Test whether a packet is an OOB packet.
  *
  * Checks that the packet is at least 5 bytes and starts with the
