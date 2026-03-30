@@ -1,30 +1,81 @@
+/*
+ * q3proto.h — Quake 3 / Urban Terror protocol helpers.
+ *
+ * The Q3 engine uses two packet classes over UDP:
+ *
+ *   1. Connectionless (out-of-band) packets — start with 4 bytes of 0xFF
+ *      followed by a plain-text command such as "getinfo", "getstatus",
+ *      "statusResponse", "infoResponse", etc.
+ *
+ *   2. Game (in-band) packets — first 4 bytes form a sequence number.
+ *      These pass through the proxy unmodified.
+ *
+ * This module only inspects connectionless packets to detect server
+ * browser queries and optionally rewrite the sv_hostname value so
+ * the proxy can be identified in the server list.
+ *
+ * Packet format for statusResponse / infoResponse:
+ *   \xFF\xFF\xFF\xFF<command>\n\\key1\\value1\\key2\\value2...\n<players>
+ */
+
 #ifndef URT_Q3PROTO_H
 #define URT_Q3PROTO_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-/* Q3 connectionless packet marker: 4 bytes of 0xFF */
+/* Connectionless (OOB) marker: first 4 bytes of the packet are 0xFF. */
 #define Q3_CONNECTIONLESS_MARKER 0xFFFFFFFF
 
-/* Max Q3 packet size */
+/* Maximum Q3 engine UDP packet size in bytes. */
 #define Q3_MAX_PACKET_SIZE 16384
 
-/* Check if a packet is a Q3 connectionless (OOB) packet */
-int  q3_is_connectionless(const uint8_t *data, size_t len);
+/*
+ * q3_is_connectionless — Test whether a packet is an OOB packet.
+ *
+ * Checks that the packet is at least 5 bytes and starts with the
+ * 4-byte marker 0xFFFFFFFF.
+ *
+ * @param data  Raw packet data.
+ * @param len   Length of the packet in bytes.
+ * @return      Non-zero if the packet is connectionless, 0 otherwise.
+ */
+int q3_is_connectionless(const uint8_t *data, size_t len);
 
 /*
- * Extract the command name from a connectionless packet.
- * Returns pointer into `data` where command starts, or NULL.
- * Sets *cmd_len to length of the command word.
+ * q3_connectionless_cmd — Extract the command word from an OOB packet.
+ *
+ * Skips the 4-byte marker and any leading whitespace, then returns a
+ * pointer to the first command character.  The command word is
+ * delimited by a space, newline, backslash, or end of packet.
+ *
+ * @param data     Raw packet data.
+ * @param len      Packet length in bytes.
+ * @param cmd_len  [out] Receives the length of the command word.
+ * @return         Pointer into @a data where the command starts, or
+ *                 NULL if the packet is not connectionless or empty.
  */
 const char *q3_connectionless_cmd(const uint8_t *data, size_t len,
                                   size_t *cmd_len);
 
 /*
- * Rewrite sv_hostname in a getstatus/getinfo response.
- * Writes the modified packet into `out` (max out_cap bytes).
- * Returns new packet length, or 0 on failure / no change needed.
+ * q3_rewrite_hostname — Prepend a tag to sv_hostname in a server response.
+ *
+ * Searches for the key "\\sv_hostname\\" in a statusResponse or
+ * infoResponse packet and rewrites the value to "<prefix> <old_value>".
+ * The modified packet is written to @a out.
+ *
+ * Only operates on statusResponse and infoResponse packets; all other
+ * packet types are left untouched (returns 0).
+ *
+ * @param data     Original packet data.
+ * @param len      Original packet length.
+ * @param out      Output buffer for the rewritten packet.
+ * @param out_cap  Size of the output buffer.
+ * @param prefix   Hostname prefix string (e.g. "[PROXY]").
+ * @return         Length of the rewritten packet in @a out, or 0 if no
+ *                 rewrite was performed (wrong packet type, key not
+ *                 found, or output buffer too small).
  */
 size_t q3_rewrite_hostname(const uint8_t *data, size_t len,
                            uint8_t *out, size_t out_cap,

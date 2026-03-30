@@ -1,3 +1,12 @@
+# urt-proxy Makefile
+#
+# Builds the urt-proxy binary from C11 source files.
+# No external dependencies — only POSIX and standard C library.
+#
+# Targets:
+#   all    — Build build/urt-proxy (default)
+#   clean  — Remove the build/ directory
+
 CC       = gcc
 CFLAGS   = -O2 -Wall -Wextra -Wno-unused-parameter -pedantic -std=c11
 CPPFLAGS = -I include
