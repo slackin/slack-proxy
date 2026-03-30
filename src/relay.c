@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "relay.h"
 #include "hashmap.h"
 #include "q3proto.h"
