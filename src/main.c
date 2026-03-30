@@ -6,6 +6,8 @@
  * to relay_run() which runs the event loop until shutdown.
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "relay.h"
 #include "q3proto.h"
 #include "log.h"
