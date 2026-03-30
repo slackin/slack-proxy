@@ -155,3 +155,23 @@ size_t q3_rewrite_hostname(const uint8_t *data, size_t len,
 
     return new_len;
 }
+
+/*
+ * q3_is_query — Test whether a packet is a server browser query.
+ *
+ * Matches connectionless "getinfo" and "getstatus" commands only.
+ */
+int q3_is_query(const uint8_t *data, size_t len)
+{
+    size_t cmd_len;
+    const char *cmd = q3_connectionless_cmd(data, len, &cmd_len);
+    if (!cmd)
+        return 0;
+
+    if (cmd_len == 7 && memcmp(cmd, "getinfo", 7) == 0)
+        return 1;
+    if (cmd_len == 9 && memcmp(cmd, "getstatus", 9) == 0)
+        return 1;
+
+    return 0;
+}

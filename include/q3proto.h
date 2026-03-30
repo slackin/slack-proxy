@@ -92,4 +92,18 @@ size_t q3_rewrite_hostname(const uint8_t *data, size_t len,
                            uint8_t *out, size_t out_cap,
                            const char *prefix);
 
+/*
+ * q3_is_query — Test whether a packet is a server browser query.
+ *
+ * Returns non-zero if the packet is a connectionless "getinfo" or
+ * "getstatus" command — the single-packet queries sent by the master
+ * server and player server browsers.  All other packet types
+ * (getchallenge, connect, game data, etc.) return 0.
+ *
+ * @param data  Raw packet data.
+ * @param len   Length of the packet in bytes.
+ * @return      Non-zero if the packet is a browser query, 0 otherwise.
+ */
+int q3_is_query(const uint8_t *data, size_t len);
+
 #endif

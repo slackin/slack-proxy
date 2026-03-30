@@ -31,6 +31,10 @@ typedef struct {
     int                 session_timeout; /* Inactivity timeout in seconds (>= 5)      */
     const char         *hostname_tag;    /* Prefix for sv_hostname (e.g. "[PROXY]"), or NULL */
 
+    /* --- Query session management --- */
+    int                 max_query_sessions; /* Max concurrent browser query sessions   */
+    int                 query_timeout;      /* Query session inactivity timeout (secs) */
+
     /* --- Rate limiting --- */
     int                 max_new_per_sec; /* Max new sessions created per second (>= 1) */
 

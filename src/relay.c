@@ -232,7 +232,8 @@ typedef struct {
     session_map_t *map;
     int            epoll_fd;
     time_t         now;
-    int            timeout;
+    int            session_timeout;
+    int            query_timeout;
     int            expired_count;
     session_t    **to_remove;       /* Array of sessions to remove */
     int            to_remove_count;
@@ -245,7 +246,8 @@ typedef struct {
 static void sweep_cb(session_t *s, void *ctx)
 {
     sweep_ctx_t *sw = ctx;
-    if (sw->now - s->last_activity > sw->timeout) {
+    int timeout = s->is_query ? sw->query_timeout : sw->session_timeout;
+    if (sw->now - s->last_activity > timeout) {
         if (sw->to_remove_count < sw->to_remove_cap)
             sw->to_remove[sw->to_remove_count++] = s;
     }
@@ -261,17 +263,23 @@ static void sweep_cb(session_t *s, void *ctx)
  *   3. Close the relay socket.
  *   4. Remove the session from the hash map.
  *
- * @param map         Session hash map.
- * @param epoll_fd    epoll instance for relay fd cleanup.
- * @param timeout     Inactivity timeout in seconds.
+ * @param map            Session hash map.
+ * @param epoll_fd       epoll instance for relay fd cleanup.
+ * @param session_timeout  Inactivity timeout for game sessions (seconds).
+ * @param query_timeout    Inactivity timeout for query sessions (seconds).
+ * @param query_count    [in/out] Pointer to the query session counter;
+ *                       decremented for each expired query session.
  */
-static void do_timeout_sweep(session_map_t *map, int epoll_fd, int timeout)
+static void do_timeout_sweep(session_map_t *map, int epoll_fd,
+                             int session_timeout, int query_timeout,
+                             int *query_count)
 {
     sweep_ctx_t sw = {0};
     sw.map     = map;
     sw.epoll_fd = epoll_fd;
     sw.now     = time(NULL);
-    sw.timeout = timeout;
+    sw.session_timeout = session_timeout;
+    sw.query_timeout   = query_timeout;
 
     /* Allocate a worst-case array (every session could be expired) */
     sw.to_remove_cap = map->count;
@@ -289,12 +297,16 @@ static void do_timeout_sweep(session_map_t *map, int epoll_fd, int timeout)
         session_t *s = sw.to_remove[i];
         char addr_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &s->client_addr.sin_addr, addr_str, sizeof(addr_str));
-        log_info("Session expired: %s:%u (pkts: %lu/%lu, bytes: %lu/%lu)",
+        log_info("Session expired: %s:%u %s (pkts: %lu/%lu, bytes: %lu/%lu)",
                  addr_str, ntohs(s->client_addr.sin_port),
+                 s->is_query ? "[query]" : "[game]",
                  (unsigned long)s->pkts_to_server,
                  (unsigned long)s->pkts_to_client,
                  (unsigned long)s->bytes_to_server,
                  (unsigned long)s->bytes_to_client);
+
+        if (s->is_query && query_count && *query_count > 0)
+            (*query_count)--;
 
         epoll_ctl(epoll_fd, EPOLL_CTL_DEL, s->relay_fd, NULL);
         close(s->relay_fd);
@@ -393,7 +405,8 @@ int relay_run(const relay_config_t *cfg)
 
     /* --- Initialise the session hash map --- */
     session_map_t sessions;
-    if (session_map_init(&sessions, cfg->max_clients) < 0) {
+    int total_capacity = cfg->max_clients + cfg->max_query_sessions;
+    if (session_map_init(&sessions, total_capacity) < 0) {
         log_error("Failed to initialize session map");
         close(listen_fd);
         close(epoll_fd);
@@ -409,14 +422,16 @@ int relay_run(const relay_config_t *cfg)
     inet_ntop(AF_INET, &cfg->remote_addr.sin_addr, remote_str, sizeof(remote_str));
     log_info("Forwarding to %s:%u via WireGuard",
              remote_str, ntohs(cfg->remote_addr.sin_port));
-    log_info("Max clients: %d, session timeout: %ds",
-             cfg->max_clients, cfg->session_timeout);
+    log_info("Max clients: %d, session timeout: %ds, query pool: %d, query timeout: %ds",
+             cfg->max_clients, cfg->session_timeout,
+             cfg->max_query_sessions, cfg->query_timeout);
 
     /* Packet buffers — stack-allocated, reused every iteration */
     uint8_t recv_buf[RECV_BUF_SIZE];      /* Raw received packet       */
     uint8_t rewrite_buf[RECV_BUF_SIZE];   /* Hostname-rewritten packet */
     struct epoll_event events[MAX_EPOLL_EVENTS];
     time_t last_sweep = time(NULL);
+    int query_count = 0;  /* Number of active browser query sessions */
 
     /*
      * Heartbeat timer — initialised to 0 so the first heartbeat fires
@@ -463,16 +478,28 @@ int relay_run(const relay_config_t *cfg)
                 session_t *sess = session_find_by_addr(&sessions, &client_addr);
                 if (!sess) {
                     /*
-                     * New client — enforce rate limit and capacity before
-                     * allocating resources.
+                     * New client — classify as browser query or game session
+                     * and enforce separate limits for each type.
                      */
-                    if (!rate_limit_check(&rate_limiter)) {
-                        log_warn("Rate limit: dropping new client");
-                        continue;
-                    }
-                    if (sessions.count >= cfg->max_clients) {
-                        log_warn("Max clients reached, dropping new connection");
-                        continue;
+                    int is_query = q3_is_query(recv_buf, (size_t)n);
+
+                    if (is_query) {
+                        /* Query sessions have their own capacity pool */
+                        if (query_count >= cfg->max_query_sessions) {
+                            log_warn("Max query sessions reached, dropping query");
+                            continue;
+                        }
+                    } else {
+                        /* Game sessions use the original rate limiter and cap */
+                        if (!rate_limit_check(&rate_limiter)) {
+                            log_warn("Rate limit: dropping new client");
+                            continue;
+                        }
+                        int game_count = sessions.count - query_count;
+                        if (game_count >= cfg->max_clients) {
+                            log_warn("Max clients reached, dropping new connection");
+                            continue;
+                        }
                     }
 
                     /* Create a dedicated relay socket for this client */
@@ -501,6 +528,9 @@ int relay_run(const relay_config_t *cfg)
                         close(relay_fd);
                         continue;
                     }
+                    sess->is_query = is_query;
+                    if (is_query)
+                        query_count++;
 
                     /* Add the relay socket to epoll so we get server responses */
                     struct epoll_event rev = {0};
@@ -511,9 +541,26 @@ int relay_run(const relay_config_t *cfg)
                     char addr_str[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &client_addr.sin_addr,
                               addr_str, sizeof(addr_str));
-                    log_info("New session: %s:%u (relay fd=%d, total=%d)",
+                    log_info("New %s session: %s:%u (relay fd=%d, total=%d, queries=%d)",
+                             is_query ? "query" : "game",
                              addr_str, ntohs(client_addr.sin_port),
-                             relay_fd, sessions.count);
+                             relay_fd, sessions.count, query_count);
+                }
+
+                /*
+                 * Session promotion: if this is an existing query session
+                 * but the new packet is NOT a query (e.g. getchallenge),
+                 * promote it to a game session so it gets the longer timeout.
+                 */
+                if (sess->is_query && !q3_is_query(recv_buf, (size_t)n)) {
+                    sess->is_query = 0;
+                    if (query_count > 0)
+                        query_count--;
+                    char addr_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &sess->client_addr.sin_addr,
+                              addr_str, sizeof(addr_str));
+                    log_info("Session promoted query->game: %s:%u",
+                             addr_str, ntohs(sess->client_addr.sin_port));
                 }
 
                 /* Update activity timestamp and traffic counters */
@@ -574,7 +621,9 @@ int relay_run(const relay_config_t *cfg)
         /*  Periodic timeout sweep                                    */
         /* ---------------------------------------------------------- */
         if (now - last_sweep >= SWEEP_INTERVAL) {
-            do_timeout_sweep(&sessions, epoll_fd, cfg->session_timeout);
+            do_timeout_sweep(&sessions, epoll_fd,
+                             cfg->session_timeout, cfg->query_timeout,
+                             &query_count);
             last_sweep = now;
         }
 

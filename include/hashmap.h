@@ -40,6 +40,7 @@ typedef struct {
     uint64_t           bytes_to_server; /* Bytes forwarded client → server        */
     uint64_t           bytes_to_client; /* Bytes forwarded server → client        */
     int                active;        /* 1 = slot in use, 0 = free               */
+    int                is_query;      /* 1 = browser query, 0 = game session     */
 } session_t;
 
 /*

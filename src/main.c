@@ -26,6 +26,8 @@
 #define DEFAULT_MAX_CLIENTS   20
 #define DEFAULT_TIMEOUT       30   /* seconds */
 #define DEFAULT_RATE_LIMIT    5    /* new sessions per second */
+#define DEFAULT_MAX_QUERY     100  /* max concurrent browser query sessions */
+#define DEFAULT_QUERY_TIMEOUT 5    /* seconds */
 
 /*
  * usage — Print a help message listing all command-line options.
@@ -49,6 +51,9 @@ static void usage(const char *prog)
         "  -t, --timeout SECS        Session timeout in seconds (default: %d)\n"
         "  -T, --hostname-tag TAG    Prefix for sv_hostname in browser (e.g. \"[PROXY]\")\n"
         "  -R, --rate-limit N        Max new sessions per second (default: %d)\n"
+        "  -Q, --max-query-sessions N\n"
+        "                            Max concurrent browser query sessions (default: %d)\n"
+        "  -q, --query-timeout SECS  Query session timeout in seconds (default: %d)\n"
         "  -M, --master-server HOST[:PORT]\n"
         "                            Master server for server list registration\n"
         "                            (port defaults to 27900, may be repeated up to %d)\n"
@@ -60,6 +65,7 @@ static void usage(const char *prog)
         prog,
         DEFAULT_LISTEN_PORT, DEFAULT_REMOTE_PORT,
         DEFAULT_MAX_CLIENTS, DEFAULT_TIMEOUT, DEFAULT_RATE_LIMIT,
+        DEFAULT_MAX_QUERY, DEFAULT_QUERY_TIMEOUT,
         RELAY_MAX_MASTERS,
         prog);
 }
@@ -72,6 +78,8 @@ int main(int argc, char **argv)
     cfg.max_clients    = DEFAULT_MAX_CLIENTS;
     cfg.session_timeout = DEFAULT_TIMEOUT;
     cfg.max_new_per_sec = DEFAULT_RATE_LIMIT;
+    cfg.max_query_sessions = DEFAULT_MAX_QUERY;
+    cfg.query_timeout = DEFAULT_QUERY_TIMEOUT;
 
     uint16_t remote_port = DEFAULT_REMOTE_PORT;
     const char *remote_host = NULL;
@@ -86,6 +94,8 @@ int main(int argc, char **argv)
         {"timeout",      required_argument, NULL, 't'},
         {"hostname-tag", required_argument, NULL, 'T'},
         {"rate-limit",   required_argument, NULL, 'R'},
+        {"max-query-sessions", required_argument, NULL, 'Q'},
+        {"query-timeout",required_argument, NULL, 'q'},
         {"master-server",required_argument, NULL, 'M'},
         {"debug",        no_argument,       NULL, 'd'},
         {"help",         no_argument,       NULL, 'h'},
@@ -94,7 +104,7 @@ int main(int argc, char **argv)
 
     /* --- Parse command-line arguments --- */
     int opt;
-    while ((opt = getopt_long(argc, argv, "r:l:p:m:t:T:R:M:dh", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "r:l:p:m:t:T:R:Q:q:M:dh", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'r':   /* --remote-host (required) */
             remote_host = optarg;
@@ -128,6 +138,12 @@ int main(int argc, char **argv)
             break;
         case 'R':   /* --rate-limit: max new sessions per second */
             cfg.max_new_per_sec = (int)strtol(optarg, NULL, 10);
+            break;
+        case 'Q':   /* --max-query-sessions: browser query session cap */
+            cfg.max_query_sessions = (int)strtol(optarg, NULL, 10);
+            break;
+        case 'q':   /* --query-timeout: browser query inactivity timeout */
+            cfg.query_timeout = (int)strtol(optarg, NULL, 10);
             break;
         case 'M': { /* --master-server HOST[:PORT] — register with a master server */
             if (cfg.master_count >= RELAY_MAX_MASTERS) {
@@ -221,6 +237,14 @@ int main(int argc, char **argv)
         fprintf(stderr, "Error: --rate-limit must be >= 1\n");
         return 1;
     }
+    if (cfg.max_query_sessions < 1 || cfg.max_query_sessions > 1000) {
+        fprintf(stderr, "Error: --max-query-sessions must be 1-1000\n");
+        return 1;
+    }
+    if (cfg.query_timeout < 1) {
+        fprintf(stderr, "Error: --query-timeout must be >= 1\n");
+        return 1;
+    }
 
     /* --- Initialise logging and print startup banner --- */
     log_init(debug ? LOG_DEBUG : LOG_INFO);
@@ -231,6 +255,8 @@ int main(int argc, char **argv)
     log_info("  Max clients:    %d", cfg.max_clients);
     log_info("  Session timeout: %ds", cfg.session_timeout);
     log_info("  Rate limit:     %d new/sec", cfg.max_new_per_sec);
+    log_info("  Query sessions: max %d, timeout %ds",
+             cfg.max_query_sessions, cfg.query_timeout);
     if (cfg.hostname_tag)
         log_info("  Hostname tag:   \"%s\"", cfg.hostname_tag);
     if (cfg.master_count > 0) {
