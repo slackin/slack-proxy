@@ -34,6 +34,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "relay.h"
+#include "mgmt.h"
 #include "hashmap.h"
 #include "q3proto.h"
 #include "log.h"
@@ -189,18 +190,6 @@ static int create_relay_socket(void)
 /* ------------------------------------------------------------------ */
 /*  Rate limiter                                                      */
 /* ------------------------------------------------------------------ */
-
-/*
- * rate_limiter_t — Sliding-window rate limiter (1-second granularity).
- *
- * Tracks how many new sessions have been created in the current
- * calendar second.  Resets the counter when the second rolls over.
- */
-typedef struct {
-    time_t  window_start;   /* Start of the current 1-second window */
-    int     count;          /* Sessions created in this window       */
-    int     max_per_sec;    /* Configured cap                        */
-} rate_limiter_t;
 
 /*
  * rate_limit_check — Attempt to consume one token from the limiter.
@@ -363,28 +352,6 @@ static void send_heartbeats(int listen_fd, const relay_config_t *cfg)
     log_info("Sent heartbeat to %d master server(s)", cfg->master_count);
 }
 
-/* ================================================================== */
-/*  Server instance — per-server runtime state                        */
-/* ================================================================== */
-
-/*
- * server_instance_t — All runtime state for a single proxied server.
- *
- * When multiple [server:*] sections are configured, relay_run() creates
- * one instance per section.  Each has its own listen socket, session
- * map, rate limiter, and sweep/heartbeat timers.
- */
-typedef struct {
-    const relay_config_t *cfg;        /* Points into the cfgs array          */
-    int                   listen_fd;  /* Public-facing UDP socket            */
-    session_map_t         sessions;   /* Per-server session hash map         */
-    int                   query_count;/* Active browser query sessions       */
-    rate_limiter_t        rate_limiter;
-    time_t                last_sweep;
-    time_t                last_heartbeat; /* 0 → fire immediately on start   */
-    int                   index;      /* Server index (for epoll routing)    */
-} server_instance_t;
-
 /* ------------------------------------------------------------------ */
 /*  Epoll data packing helpers                                        */
 /* ------------------------------------------------------------------ */
@@ -435,7 +402,8 @@ static inline int unpack_fd(uint64_t data)
  *      d. Every Q3_HEARTBEAT_INTERVAL seconds, send heartbeats (all servers).
  *   5. On shutdown: close every open socket, free all maps.
  */
-int relay_run(const relay_config_t *cfgs, int server_count)
+int relay_run(const relay_config_t *cfgs, int server_count,
+              const mgmt_config_t *mgmt_cfg)
 {
     /* --- Install SIGINT/SIGTERM handlers for graceful shutdown --- */
     struct sigaction sa = {0};
@@ -460,6 +428,8 @@ int relay_run(const relay_config_t *cfgs, int server_count)
     }
 
     int init_count = 0; /* How many servers we've successfully initialised */
+    mgmt_state_t mgmt_state;
+    int mgmt_active = 0;
 
     for (int s = 0; s < server_count; s++) {
         server_instance_t *srv = &servers[s];
@@ -507,6 +477,15 @@ int relay_run(const relay_config_t *cfgs, int server_count)
         init_count++;
     }
 
+    /* --- Initialise management API (if configured) --- */
+    if (mgmt_cfg && mgmt_cfg->enabled) {
+        if (mgmt_init(&mgmt_state, mgmt_cfg, epoll_fd,
+                      servers, init_count) == 0)
+            mgmt_active = 1;
+        else
+            log_warn("Management API failed to start — continuing without it");
+    }
+
     /* Packet buffers — stack-allocated, reused every iteration */
     uint8_t recv_buf[RECV_BUF_SIZE];
     uint8_t rewrite_buf[RECV_BUF_SIZE];
@@ -531,6 +510,13 @@ int relay_run(const relay_config_t *cfgs, int server_count)
         for (int i = 0; i < nfds; i++) {
             int srv_idx = unpack_server_index(events[i].data.u64);
             int fd      = unpack_fd(events[i].data.u64);
+
+            /* Route management events to the mgmt handler */
+            if (srv_idx == MGMT_SERVER_INDEX) {
+                if (mgmt_active)
+                    mgmt_handle_event(&mgmt_state, fd);
+                continue;
+            }
 
             if (srv_idx < 0 || srv_idx >= server_count)
                 continue;
@@ -746,6 +732,9 @@ int relay_run(const relay_config_t *cfgs, int server_count)
     /*  session map, and close the listen socket.                     */
     /* ============================================================== */
 cleanup:
+    if (mgmt_active)
+        mgmt_cleanup(&mgmt_state);
+
     log_info("Shutting down — closing %d server(s)...", init_count);
 
     for (int s = 0; s < init_count; s++) {

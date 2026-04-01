@@ -22,6 +22,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "config.h"
+#include "mgmt.h"
 #include "q3proto.h"
 #include "log.h"
 
@@ -390,6 +391,31 @@ int config_load(const char *path, proxy_config_t *out)
                 out->debug = (strcmp(value, "true") == 0 ||
                               strcmp(value, "1") == 0 ||
                               strcmp(value, "yes") == 0);
+            } else if (strcmp(key, "mgmt-port") == 0) {
+                out->mgmt.port = (uint16_t)atoi(value);
+                out->mgmt.listen_addr.sin_family = AF_INET;
+                out->mgmt.listen_addr.sin_port = htons(out->mgmt.port);
+            } else if (strcmp(key, "mgmt-addr") == 0) {
+                out->mgmt.listen_addr.sin_family = AF_INET;
+                if (inet_pton(AF_INET, value,
+                              &out->mgmt.listen_addr.sin_addr) != 1) {
+                    fprintf(stderr, "Line %d: invalid mgmt-addr '%s'\n",
+                            line_no, value);
+                    rc = -1;
+                    break;
+                }
+            } else if (strcmp(key, "mgmt-key") == 0) {
+                out->mgmt.api_key = strdup(value);
+                out->mgmt.enabled = 1;
+                /* Apply defaults if not yet set */
+                if (out->mgmt.listen_addr.sin_family == 0) {
+                    out->mgmt.listen_addr.sin_family = AF_INET;
+                    out->mgmt.listen_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                }
+                if (out->mgmt.port == 0) {
+                    out->mgmt.port = MGMT_DEFAULT_PORT;
+                    out->mgmt.listen_addr.sin_port = htons(MGMT_DEFAULT_PORT);
+                }
             } else {
                 fprintf(stderr, "Line %d: unknown global key '%s'\n",
                         line_no, key);

@@ -13,6 +13,8 @@ over a WireGuard tunnel to reduce latency by routing through a better network pa
 - **Multi-server support** — proxy multiple game servers from one process using an INI config file, each on a different port
 - **Per-client sessions** — each player gets a dedicated relay socket for proper bidirectional NAT
 - **Query session management** — browser queries and game sessions are tracked separately with independent limits and timeouts
+- **Remote management API** — TCP-based JSON management interface for monitoring and runtime tuning
+- **GUI management client** — cross-platform Python+tkinter GUI for remote proxy configuration
 - **Single-threaded epoll** — efficient event loop with no threads and no external dependencies
 - **Rate limiting** — caps new session creation to prevent abuse
 - **Master server heartbeat** — periodic registration with UrT master server(s) so the proxy appears in the server browser
@@ -88,6 +90,14 @@ urt-proxy supports two modes: **single-server CLI mode** and **multi-server conf
 | `-d, --debug` | off | Enable debug-level logging |
 | `-h, --help` | | Show usage help |
 
+#### Management API (available in both modes)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mgmt-key KEY` | *(none)* | Enable management API with this shared secret |
+| `--mgmt-port PORT` | 27961 | TCP port for management connections |
+| `--mgmt-addr ADDR` | 127.0.0.1 | Address to bind the management listener (use `0.0.0.0` for remote access) |
+
 #### Example
 
 ```bash
@@ -117,6 +127,9 @@ See [`urt-proxy.conf.example`](urt-proxy.conf.example) for a complete annotated 
 ```ini
 [global]
 debug = false
+mgmt-key = my-secret-api-key    # enables management API
+mgmt-port = 27961               # optional, default 27961
+mgmt-addr = 127.0.0.1           # optional, default 127.0.0.1
 
 [server:dallas]
 listen-port   = 27960
@@ -173,6 +186,59 @@ Rate limit, capacity, and query session warnings include the client address and 
 
 Enable debug logging with `-d` for verbose packet-level diagnostics (e.g. hostname rewrite events).
 
+## Remote Management
+
+urt-proxy includes a TCP-based management API for remote monitoring and runtime tuning. Enable it by providing an API key via `--mgmt-key` (CLI) or `mgmt-key` (config file).
+
+### Quick Start
+
+```bash
+# Start proxy with management API enabled
+./build/urt-proxy -r 10.0.0.2 --mgmt-key my-secret-key
+
+# Launch the GUI client
+python3 gui/urt-mgmt.py
+```
+
+### Protocol
+
+The management API uses **newline-delimited JSON over TCP**. Each message is a single JSON object terminated by `\n`.
+
+**Authentication** (first message):
+```json
+{"auth":"my-secret-key"}
+```
+
+**Commands** (after authentication):
+```json
+{"cmd":"status"}
+{"cmd":"sessions","server":0}
+{"cmd":"set","server":0,"key":"max_clients","value":50}
+{"cmd":"kick","server":0,"client":"203.0.113.42:12345"}
+{"cmd":"kick_all","server":0}
+```
+
+**Tunable parameters**: `max_clients`, `session_timeout`, `query_timeout`, `max_new_per_sec`, `max_query_sessions`, `hostname_tag`
+
+### GUI Client
+
+The `gui/urt-mgmt.py` client provides a graphical interface for management. It requires Python 3.6+ with tkinter (included in standard Python installs). No pip packages needed.
+
+Features:
+- Connect to any urt-proxy management endpoint
+- View server configuration and live session counts
+- Tune runtime parameters with instant apply
+- Browse active sessions with traffic statistics
+- Kick individual sessions or all sessions on a server
+- Auto-refreshing display (2-second interval)
+
+### Security Notes
+
+- The management listener defaults to `127.0.0.1` (localhost only)
+- Set `mgmt-addr = 0.0.0.0` to allow remote connections — ensure firewall rules are in place
+- API key is transmitted in plaintext; use a VPN or SSH tunnel for remote management over untrusted networks
+- Maximum 4 concurrent management connections
+
 ## Architecture
 
 - **Single-threaded epoll** event loop — handles all I/O without threads, multiplexed across all configured servers
@@ -192,7 +258,8 @@ Enable debug logging with `-d` for verbose packet-level diagnostics (e.g. hostna
 ```
 include/
   config.h     INI config file parser types and API
-  relay.h      Relay configuration struct and entry point
+  relay.h      Relay configuration struct, server instance, and entry point
+  mgmt.h       Management API types and interface
   hashmap.h    Session storage with dual-index hash map
   q3proto.h    Quake 3 protocol helpers (OOB packet parsing)
   log.h        Timestamped levelled logging
@@ -200,9 +267,12 @@ src/
   main.c       CLI parsing, validation, startup (single-server and config modes)
   config.c     INI config file parser with hostname resolution and validation
   relay.c      epoll event loop, session lifecycle, packet forwarding, heartbeats
+  mgmt.c       TCP management server — JSON protocol, command handlers
   hashmap.c    Open-addressing hash map with linear probing (rebuild on delete)
   q3proto.c    Connectionless packet inspection and hostname rewriting
   log.c        Formatted stderr logging with severity levels
+gui/
+  urt-mgmt.py  Cross-platform Python+tkinter management GUI client
 ```
 
 ## Systemd Service (optional)

@@ -10,6 +10,7 @@
 
 #include "relay.h"
 #include "config.h"
+#include "mgmt.h"
 #include "q3proto.h"
 #include "log.h"
 
@@ -67,6 +68,11 @@ static void usage(const char *prog)
         "  -d, --debug               Enable debug logging\n"
         "  -h, --help                Show this help\n"
         "\n"
+        "Management API:\n"
+        "  --mgmt-key KEY            Enable management API with this API key\n"
+        "  --mgmt-port PORT          Management listen port (default: %d)\n"
+        "  --mgmt-addr ADDR          Management listen address (default: 127.0.0.1)\n"
+        "\n"
         "Examples:\n"
         "  %s -r 10.0.0.2 -l 27960 -p 27960 -T \"[PROXY]\" -M master.urbanterror.info\n"
         "  %s -c /etc/urt-proxy.conf\n",
@@ -75,6 +81,7 @@ static void usage(const char *prog)
         DEFAULT_MAX_CLIENTS, DEFAULT_TIMEOUT, DEFAULT_RATE_LIMIT,
         DEFAULT_MAX_QUERY, DEFAULT_QUERY_TIMEOUT,
         RELAY_MAX_MASTERS,
+        MGMT_DEFAULT_PORT,
         prog, prog);
 }
 
@@ -94,6 +101,9 @@ int main(int argc, char **argv)
     const char *config_file = NULL;
     int debug = 0;
 
+    /* Management API options (CLI, applied in both modes) */
+    mgmt_config_t mgmt_cfg = {0};
+
     /* Long option definitions for getopt_long */
     static struct option long_opts[] = {
         {"remote-host",  required_argument, NULL, 'r'},
@@ -109,6 +119,9 @@ int main(int argc, char **argv)
         {"config",       required_argument, NULL, 'c'},
         {"debug",        no_argument,       NULL, 'd'},
         {"help",         no_argument,       NULL, 'h'},
+        {"mgmt-key",     required_argument, NULL,  1 },
+        {"mgmt-port",    required_argument, NULL,  2 },
+        {"mgmt-addr",    required_argument, NULL,  3 },
         {NULL, 0, NULL, 0}
     };
 
@@ -218,6 +231,28 @@ int main(int argc, char **argv)
         case 'd':   /* --debug: enable LOG_DEBUG output */
             debug = 1;
             break;
+        case 1:     /* --mgmt-key: API key to enable management */
+            mgmt_cfg.api_key = optarg;
+            mgmt_cfg.enabled = 1;
+            break;
+        case 2: {   /* --mgmt-port: management listen port */
+            long v = strtol(optarg, NULL, 10);
+            if (v < 1 || v > 65535) {
+                fprintf(stderr, "Error: --mgmt-port must be 1-65535\n");
+                return 1;
+            }
+            mgmt_cfg.port = (uint16_t)v;
+            break;
+        }
+        case 3:     /* --mgmt-addr: management listen address */
+            if (inet_pton(AF_INET, optarg,
+                          &mgmt_cfg.listen_addr.sin_addr) != 1) {
+                fprintf(stderr, "Error: '%s' is not a valid IPv4 address\n",
+                        optarg);
+                return 1;
+            }
+            mgmt_cfg.listen_addr.sin_family = AF_INET;
+            break;
         case 'h':   /* --help */
         default:
             usage(argv[0]);
@@ -246,7 +281,26 @@ int main(int argc, char **argv)
         log_info("urt-proxy starting (%d server(s) from %s)",
                  pcfg.server_count, config_file);
 
-        return relay_run(pcfg.servers, pcfg.server_count) == 0 ? 0 : 1;
+        /* CLI --mgmt-* flags override config-file mgmt settings */
+        if (mgmt_cfg.enabled) {
+            pcfg.mgmt = mgmt_cfg;
+        }
+        /* Apply mgmt defaults if needed */
+        if (pcfg.mgmt.enabled) {
+            if (pcfg.mgmt.listen_addr.sin_family == 0) {
+                pcfg.mgmt.listen_addr.sin_family = AF_INET;
+                pcfg.mgmt.listen_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            }
+            if (pcfg.mgmt.port == 0) {
+                pcfg.mgmt.port = MGMT_DEFAULT_PORT;
+                pcfg.mgmt.listen_addr.sin_port = htons(MGMT_DEFAULT_PORT);
+            }
+            if (pcfg.mgmt.listen_addr.sin_port == 0)
+                pcfg.mgmt.listen_addr.sin_port = htons(pcfg.mgmt.port);
+        }
+
+        return relay_run(pcfg.servers, pcfg.server_count,
+                         pcfg.mgmt.enabled ? &pcfg.mgmt : NULL) == 0 ? 0 : 1;
     }
 
     /* ================================================================ */
@@ -319,6 +373,21 @@ int main(int argc, char **argv)
         log_info("  Master server:  (none — not registering in server list)");
     }
 
+    /* --- Apply management API defaults for single-server mode --- */
+    if (mgmt_cfg.enabled) {
+        if (mgmt_cfg.listen_addr.sin_family == 0) {
+            mgmt_cfg.listen_addr.sin_family = AF_INET;
+            mgmt_cfg.listen_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        }
+        if (mgmt_cfg.port == 0) {
+            mgmt_cfg.port = MGMT_DEFAULT_PORT;
+            mgmt_cfg.listen_addr.sin_port = htons(MGMT_DEFAULT_PORT);
+        }
+        if (mgmt_cfg.listen_addr.sin_port == 0)
+            mgmt_cfg.listen_addr.sin_port = htons(mgmt_cfg.port);
+    }
+
     /* Hand off to the blocking event loop — returns on shutdown or error */
-    return relay_run(&cfg, 1) == 0 ? 0 : 1;
+    return relay_run(&cfg, 1,
+                     mgmt_cfg.enabled ? &mgmt_cfg : NULL) == 0 ? 0 : 1;
 }

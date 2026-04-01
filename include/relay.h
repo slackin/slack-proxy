@@ -10,7 +10,13 @@
 #define URT_RELAY_H
 
 #include <stdint.h>
+#include <time.h>
 #include <netinet/in.h>
+
+#include "hashmap.h"
+
+/* Forward declaration — full definition in mgmt.h */
+typedef struct mgmt_config mgmt_config_t;
 
 /* Maximum number of master servers the proxy can register with. */
 #define RELAY_MAX_MASTERS 4
@@ -59,6 +65,33 @@ typedef struct {
 } relay_config_t;
 
 /*
+ * rate_limiter_t — Sliding-window rate limiter (1-second granularity).
+ */
+typedef struct {
+    time_t  window_start;   /* Start of the current 1-second window */
+    int     count;          /* Sessions created in this window       */
+    int     max_per_sec;    /* Configured cap                        */
+} rate_limiter_t;
+
+/*
+ * server_instance_t — All runtime state for a single proxied server.
+ *
+ * When multiple [server:*] sections are configured, relay_run() creates
+ * one instance per section.  Each has its own listen socket, session
+ * map, rate limiter, and sweep/heartbeat timers.
+ */
+struct server_instance {
+    const relay_config_t *cfg;        /* Points into the cfgs array          */
+    int                   listen_fd;  /* Public-facing UDP socket            */
+    session_map_t         sessions;   /* Per-server session hash map         */
+    int                   query_count;/* Active browser query sessions       */
+    rate_limiter_t        rate_limiter;
+    time_t                last_sweep;
+    time_t                last_heartbeat; /* 0 → fire immediately on start   */
+    int                   index;      /* Server index (for epoll routing)    */
+};
+
+/*
  * relay_run — Run the main relay event loop (blocking).
  *
  * Sets up a UDP listen socket per server, a shared epoll instance, and
@@ -72,8 +105,10 @@ typedef struct {
  *
  * @param cfgs          Array of fully-populated relay_config_t structs.
  * @param server_count  Number of entries in @a cfgs (1 or more).
+ * @param mgmt_cfg      Management API config (NULL to disable).
  * @return              0 on clean shutdown, -1 on fatal error.
  */
-int relay_run(const relay_config_t *cfgs, int server_count);
+int relay_run(const relay_config_t *cfgs, int server_count,
+              const mgmt_config_t *mgmt_cfg);
 
 #endif

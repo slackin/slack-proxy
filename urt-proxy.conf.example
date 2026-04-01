@@ -13,6 +13,17 @@
 # Enable verbose debug logging (default: false)
 debug = false
 
+# Management API — enable remote configuration over TCP.
+# Requires an API key; without one the management API is disabled.
+# mgmt-key = my-secret-api-key
+
+# Management API listen port (default: 27961)
+# mgmt-port = 27961
+
+# Management API listen address (default: 127.0.0.1)
+# Set to 0.0.0.0 to allow remote connections (use with caution)
+# mgmt-addr = 127.0.0.1
+
 [server:dallas]
 # Local UDP port that clients connect to
 listen-port = 27960

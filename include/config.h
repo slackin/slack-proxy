@@ -45,6 +45,7 @@
 #define URT_CONFIG_H
 
 #include "relay.h"
+#include "mgmt.h"
 
 /* Maximum number of server sections allowed in a config file. */
 #define CONFIG_MAX_SERVERS 32
@@ -58,6 +59,7 @@ typedef struct {
     int             debug;                            /* Global debug flag (from [global]) */
     relay_config_t  servers[CONFIG_MAX_SERVERS];       /* Per-server configurations         */
     int             server_count;                      /* Number of servers loaded           */
+    mgmt_config_t   mgmt;                              /* Management API configuration       */
 } proxy_config_t;
 
 /*
