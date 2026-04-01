@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::thread;
 
@@ -8,12 +9,16 @@ use crate::net::MgmtConnection;
 /// Commands sent from the GUI thread to the worker.
 pub enum Command {
     Connect {
+        proxy_id: u64,
         host: String,
         port: u16,
         key: String,
     },
-    Disconnect,
+    Disconnect {
+        proxy_id: u64,
+    },
     Send {
+        proxy_id: u64,
         cmd_name: String,
         payload: Value,
     },
@@ -22,13 +27,16 @@ pub enum Command {
 /// Responses sent from the worker thread back to the GUI.
 pub enum Response {
     Connected {
+        proxy_id: u64,
         ok: bool,
         msg: String,
     },
     Disconnected {
+        proxy_id: u64,
         msg: String,
     },
     CmdResult {
+        proxy_id: u64,
         cmd_name: String,
         data: Option<Value>,
     },
@@ -49,47 +57,51 @@ pub fn spawn_worker() -> (mpsc::Sender<Command>, mpsc::Receiver<Response>) {
 }
 
 fn worker_loop(cmd_rx: mpsc::Receiver<Command>, resp_tx: mpsc::Sender<Response>) {
-    let mut conn: Option<MgmtConnection> = None;
+    let mut conns: HashMap<u64, MgmtConnection> = HashMap::new();
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
-            Command::Connect { host, port, key } => {
+            Command::Connect { proxy_id, host, port, key } => {
                 match MgmtConnection::connect(&host, port, &key) {
                     Ok(c) => {
-                        conn = Some(c);
+                        conns.insert(proxy_id, c);
                         let _ = resp_tx.send(Response::Connected {
+                            proxy_id,
                             ok: true,
                             msg: "Connected and authenticated".to_string(),
                         });
                     }
                     Err(e) => {
-                        conn = None;
+                        conns.remove(&proxy_id);
                         let _ = resp_tx.send(Response::Connected {
+                            proxy_id,
                             ok: false,
                             msg: e,
                         });
                     }
                 }
             }
-            Command::Disconnect => {
-                conn = None;
+            Command::Disconnect { proxy_id } => {
+                conns.remove(&proxy_id);
                 let _ = resp_tx.send(Response::Disconnected {
+                    proxy_id,
                     msg: "Disconnected".to_string(),
                 });
             }
-            Command::Send { cmd_name, payload } => {
-                if let Some(ref mut c) = conn {
+            Command::Send { proxy_id, cmd_name, payload } => {
+                if let Some(c) = conns.get_mut(&proxy_id) {
                     match c.send_command(&payload) {
                         Ok(resp) => {
                             let _ = resp_tx.send(Response::CmdResult {
+                                proxy_id,
                                 cmd_name,
                                 data: Some(resp),
                             });
                         }
                         Err(_e) => {
-                            // Connection likely dead
-                            conn = None;
+                            conns.remove(&proxy_id);
                             let _ = resp_tx.send(Response::CmdResult {
+                                proxy_id,
                                 cmd_name,
                                 data: None,
                             });
@@ -97,6 +109,7 @@ fn worker_loop(cmd_rx: mpsc::Receiver<Command>, resp_tx: mpsc::Sender<Response>)
                     }
                 } else {
                     let _ = resp_tx.send(Response::CmdResult {
+                        proxy_id,
                         cmd_name,
                         data: None,
                     });

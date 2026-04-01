@@ -9,10 +9,35 @@ use crate::protocol::ServerInfo;
 /// Render the server tabs and content in the central panel.
 pub fn show(app: &mut App, ctx: &egui::Context) {
     egui::CentralPanel::default().show(ctx, |ui| {
-        if app.server_data.is_empty() && !app.connected {
+        let proxy_id = match app.active_proxy_id {
+            Some(id) => id,
+            None => {
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        egui::RichText::new("Add a proxy in the sidebar to get started.")
+                            .size(16.0)
+                            .color(egui::Color32::from_rgb(160, 160, 170)),
+                    );
+                });
+                return;
+            }
+        };
+
+        let connected = app
+            .proxy_states
+            .get(&proxy_id)
+            .map(|s| s.connected)
+            .unwrap_or(false);
+        let server_count = app
+            .proxy_states
+            .get(&proxy_id)
+            .map(|s| s.server_data.len())
+            .unwrap_or(0);
+
+        if server_count == 0 && !connected {
             ui.centered_and_justified(|ui| {
                 ui.label(
-                    egui::RichText::new("Connect to a urt-proxy instance to begin.")
+                    egui::RichText::new("Connect to this proxy to begin.")
                         .size(16.0)
                         .color(egui::Color32::from_rgb(160, 160, 170)),
                 );
@@ -23,9 +48,28 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         // Tab bar + Add Server button
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            for (i, srv) in app.server_data.iter().enumerate() {
-                let label = format!("Server #{} :{}", i + 1, srv.listen_port);
-                let selected = app.active_tab == i;
+
+            let tab_info: Vec<(usize, u16)> = app
+                .proxy_states
+                .get(&proxy_id)
+                .map(|s| {
+                    s.server_data
+                        .iter()
+                        .enumerate()
+                        .map(|(i, srv)| (i, srv.listen_port))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let active_tab = app
+                .proxy_states
+                .get(&proxy_id)
+                .map(|s| s.active_tab)
+                .unwrap_or(0);
+
+            for (i, listen_port) in &tab_info {
+                let label = format!("Server #{} :{}", i + 1, listen_port);
+                let selected = active_tab == *i;
                 let btn = egui::Button::new(
                     egui::RichText::new(&label).strong(),
                 )
@@ -42,12 +86,14 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 });
 
                 if ui.add(btn).clicked() {
-                    app.active_tab = i;
+                    if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                        state.active_tab = *i;
+                    }
                 }
             }
 
             ui.spacing_mut().item_spacing.x = 8.0;
-            if app.connected {
+            if connected {
                 if ui
                     .add(
                         egui::Button::new(
@@ -57,14 +103,16 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     )
                     .clicked()
                 {
-                    app.show_add_server = true;
+                    if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                        state.show_add_server = true;
+                    }
                 }
             }
         });
 
         ui.separator();
 
-        if app.server_data.is_empty() {
+        if server_count == 0 {
             ui.centered_and_justified(|ui| {
                 ui.label(
                     egui::RichText::new(
@@ -75,32 +123,40 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 );
             });
         } else {
-            // Tab content
-            let tab = app.active_tab;
-            if tab < app.server_data.len() {
-                let srv = app.server_data[tab].clone();
+            // Get tab data
+            let (tab, srv, srv_idx) = {
+                let state = match app.proxy_states.get(&proxy_id) {
+                    Some(s) => s,
+                    None => return,
+                };
+                let tab = state.active_tab;
+                if tab >= state.server_data.len() {
+                    return;
+                }
+                let srv = state.server_data[tab].clone();
                 let srv_idx = srv.index;
+                (tab, srv, srv_idx)
+            };
 
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        show_config(ui, &srv);
-                        ui.add_space(4.0);
-                        show_tunables(app, ui, tab, srv_idx, &srv);
-                        ui.add_space(4.0);
-                        show_sessions(app, ui, tab, srv_idx);
-                        ui.add_space(8.0);
-                        show_remove_button(app, ui, srv_idx);
-                    });
-            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    show_config(ui, &srv);
+                    ui.add_space(4.0);
+                    show_tunables(app, ui, proxy_id, tab, srv_idx, &srv);
+                    ui.add_space(4.0);
+                    show_sessions(app, ui, proxy_id, tab, srv_idx);
+                    ui.add_space(8.0);
+                    show_remove_button(app, ui, proxy_id, srv_idx);
+                });
         }
     });
 
-    // Add Server modal window
-    show_add_server_modal(app, ctx);
-
-    // Remove confirmation modal
-    show_remove_confirm_modal(app, ctx);
+    // Modals need proxy_id
+    if let Some(proxy_id) = app.active_proxy_id {
+        show_add_server_modal(app, ctx, proxy_id);
+        show_remove_confirm_modal(app, ctx, proxy_id);
+    }
 }
 
 fn show_config(ui: &mut egui::Ui, srv: &ServerInfo) {
@@ -132,10 +188,19 @@ fn show_config(ui: &mut egui::Ui, srv: &ServerInfo) {
         });
 }
 
-fn show_tunables(app: &mut App, ui: &mut egui::Ui, tab: usize, srv_idx: usize, srv: &ServerInfo) {
+fn show_tunables(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    proxy_id: u64,
+    tab: usize,
+    srv_idx: usize,
+    srv: &ServerInfo,
+) {
     // Ensure tune_values exist for this tab
-    while app.tune_values.len() <= tab {
-        app.tune_values.push(Default::default());
+    if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+        while state.tune_values.len() <= tab {
+            state.tune_values.push(Default::default());
+        }
     }
 
     egui::CollapsingHeader::new(egui::RichText::new("🔧  Tune Parameters").strong())
@@ -154,51 +219,80 @@ fn show_tunables(app: &mut App, ui: &mut egui::Ui, tab: usize, srv_idx: usize, s
                     ];
 
                     for (key, label, _current) in &int_tunables {
-                        let entry = app.tune_values[tab]
-                            .entry(key.to_string())
-                            .or_default();
+                        let entry_val = app
+                            .proxy_states
+                            .get_mut(&proxy_id)
+                            .and_then(|s| s.tune_values.get_mut(tab))
+                            .map(|tv| {
+                                tv.entry(key.to_string()).or_default();
+                                tv
+                            });
 
-                        ui.label(format!("{}:", label));
-                        ui.add(
-                            egui::TextEdit::singleline(entry)
-                                .desired_width(80.0),
-                        );
-                        if ui.button("Apply").clicked() {
-                            if let Ok(val) = entry.parse::<i64>() {
-                                app.send_set(srv_idx, key, serde_json::json!(val));
-                            } else {
-                                app.log(&format!("Invalid integer for {}", key));
+                        if let Some(tv) = entry_val {
+                            let entry = tv.get_mut(*key).unwrap();
+
+                            ui.label(format!("{}:", label));
+                            ui.add(
+                                egui::TextEdit::singleline(entry).desired_width(80.0),
+                            );
+                            if ui.button("Apply").clicked() {
+                                if let Ok(val) = entry.parse::<i64>() {
+                                    app.send_set(proxy_id, srv_idx, key, serde_json::json!(val));
+                                } else {
+                                    app.log_active(&format!("Invalid integer for {}", key));
+                                }
                             }
+                            ui.end_row();
                         }
-                        ui.end_row();
                     }
 
                     // Hostname tag (string tunable)
-                    let tag_entry = app.tune_values[tab]
-                        .entry("hostname_tag".to_string())
-                        .or_default();
-                    ui.label("Hostname Tag:");
-                    ui.add(
-                        egui::TextEdit::singleline(tag_entry)
-                            .desired_width(160.0),
-                    );
-                    if ui.button("Apply").clicked() {
-                        let val = tag_entry.clone();
-                        app.send_set(srv_idx, "hostname_tag", serde_json::json!(val));
+                    let tag_val = app
+                        .proxy_states
+                        .get_mut(&proxy_id)
+                        .and_then(|s| s.tune_values.get_mut(tab))
+                        .map(|tv| {
+                            tv.entry("hostname_tag".to_string()).or_default();
+                            tv
+                        });
+
+                    if let Some(tv) = tag_val {
+                        let tag_entry = tv.get_mut("hostname_tag").unwrap();
+                        ui.label("Hostname Tag:");
+                        ui.add(
+                            egui::TextEdit::singleline(tag_entry).desired_width(160.0),
+                        );
+                        if ui.button("Apply").clicked() {
+                            let val = tag_entry.clone();
+                            app.send_set(
+                                proxy_id,
+                                srv_idx,
+                                "hostname_tag",
+                                serde_json::json!(val),
+                            );
+                        }
+                        ui.end_row();
                     }
-                    ui.end_row();
                 });
         });
 }
 
-fn show_sessions(app: &mut App, ui: &mut egui::Ui, tab: usize, srv_idx: usize) {
-    let sessions = app.session_data.get(&srv_idx).cloned().unwrap_or_default();
+fn show_sessions(app: &mut App, ui: &mut egui::Ui, proxy_id: u64, tab: usize, srv_idx: usize) {
+    let sessions = app
+        .proxy_states
+        .get(&proxy_id)
+        .and_then(|s| s.session_data.get(&srv_idx))
+        .cloned()
+        .unwrap_or_default();
+
     let active_count = sessions.iter().filter(|s| !s.is_query).count();
     let query_count = sessions.iter().filter(|s| s.is_query).count();
 
     // Ensure selected set exists
-    while app.selected_sessions.len() <= tab {
-        app.selected_sessions.push(HashSet::new());
+    if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+        while state.selected_sessions.len() <= tab {
+            state.selected_sessions.push(HashSet::new());
+        }
     }
 
     egui::CollapsingHeader::new(
@@ -214,14 +308,14 @@ fn show_sessions(app: &mut App, ui: &mut egui::Ui, tab: usize, srv_idx: usize) {
             .striped(true)
             .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(24.0))        // checkbox
-            .column(Column::initial(160.0).at_least(100.0)) // client
-            .column(Column::initial(55.0))       // query
-            .column(Column::initial(60.0))       // idle
-            .column(Column::initial(80.0))       // pkts up
-            .column(Column::initial(80.0))       // pkts down
-            .column(Column::initial(90.0))       // bytes up
-            .column(Column::remainder().at_least(90.0)) // bytes down
+            .column(Column::exact(24.0))
+            .column(Column::initial(160.0).at_least(100.0))
+            .column(Column::initial(55.0))
+            .column(Column::initial(60.0))
+            .column(Column::initial(80.0))
+            .column(Column::initial(80.0))
+            .column(Column::initial(90.0))
+            .column(Column::remainder().at_least(90.0))
             .min_scrolled_height(0.0)
             .max_scroll_height(300.0);
 
@@ -240,15 +334,24 @@ fn show_sessions(app: &mut App, ui: &mut egui::Ui, tab: usize, srv_idx: usize) {
                 for sess in &sessions {
                     body.row(20.0, |mut row| {
                         let client_key = sess.client.clone();
-                        let is_selected = app.selected_sessions[tab].contains(&client_key);
+                        let is_selected = app
+                            .proxy_states
+                            .get(&proxy_id)
+                            .and_then(|s| s.selected_sessions.get(tab))
+                            .map(|ss| ss.contains(&client_key))
+                            .unwrap_or(false);
 
                         row.col(|ui| {
                             let mut sel = is_selected;
                             if ui.checkbox(&mut sel, "").changed() {
-                                if sel {
-                                    app.selected_sessions[tab].insert(client_key.clone());
-                                } else {
-                                    app.selected_sessions[tab].remove(&client_key);
+                                if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                                    if let Some(ss) = state.selected_sessions.get_mut(tab) {
+                                        if sel {
+                                            ss.insert(client_key.clone());
+                                        } else {
+                                            ss.remove(&client_key);
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -293,22 +396,35 @@ fn show_sessions(app: &mut App, ui: &mut egui::Ui, tab: usize, srv_idx: usize) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui.button("Kick Selected").clicked() {
-                let selected: Vec<String> =
-                    app.selected_sessions[tab].iter().cloned().collect();
-                for client in selected {
-                    app.send_kick(srv_idx, &client);
+                let to_kick: Vec<String> = app
+                    .proxy_states
+                    .get_mut(&proxy_id)
+                    .and_then(|s| s.selected_sessions.get_mut(tab))
+                    .map(|ss| {
+                        let selected: Vec<String> = ss.iter().cloned().collect();
+                        ss.clear();
+                        selected
+                    })
+                    .unwrap_or_default();
+                for client in to_kick {
+                    app.send_kick(proxy_id, srv_idx, &client);
                 }
-                app.selected_sessions[tab].clear();
             }
 
             if ui.button("Kick All").clicked() {
-                app.confirm_kick_all = Some(srv_idx);
+                if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                    state.confirm_kick_all = Some(srv_idx);
+                }
             }
         });
     });
 
     // Kick All confirmation modal
-    if let Some(kick_srv) = app.confirm_kick_all {
+    let confirm = app
+        .proxy_states
+        .get(&proxy_id)
+        .and_then(|s| s.confirm_kick_all);
+    if let Some(kick_srv) = confirm {
         egui::Window::new("Confirm Kick All")
             .collapsible(false)
             .resizable(false)
@@ -327,18 +443,22 @@ fn show_sessions(app: &mut App, ui: &mut egui::Ui, tab: usize, srv_idx: usize) {
                         )
                         .clicked()
                     {
-                        app.send_kick_all(kick_srv);
-                        app.confirm_kick_all = None;
+                        app.send_kick_all(proxy_id, kick_srv);
+                        if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                            state.confirm_kick_all = None;
+                        }
                     }
                     if ui.button("Cancel").clicked() {
-                        app.confirm_kick_all = None;
+                        if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                            state.confirm_kick_all = None;
+                        }
                     }
                 });
             });
     }
 }
 
-fn show_remove_button(app: &mut App, ui: &mut egui::Ui, srv_idx: usize) {
+fn show_remove_button(app: &mut App, ui: &mut egui::Ui, proxy_id: u64, srv_idx: usize) {
     ui.separator();
     if ui
         .add(
@@ -350,12 +470,19 @@ fn show_remove_button(app: &mut App, ui: &mut egui::Ui, srv_idx: usize) {
         )
         .clicked()
     {
-        app.confirm_remove = Some(srv_idx);
+        if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+            state.confirm_remove = Some(srv_idx);
+        }
     }
 }
 
-fn show_add_server_modal(app: &mut App, ctx: &egui::Context) {
-    if !app.show_add_server {
+fn show_add_server_modal(app: &mut App, ctx: &egui::Context, proxy_id: u64) {
+    let show = app
+        .proxy_states
+        .get(&proxy_id)
+        .map(|s| s.show_add_server)
+        .unwrap_or(false);
+    if !show {
         return;
     }
 
@@ -367,54 +494,68 @@ fn show_add_server_modal(app: &mut App, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .min_width(340.0)
         .show(ctx, |ui| {
-            egui::Grid::new("add_server_grid")
-                .num_columns(2)
-                .spacing([12.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("Listen Port:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut app.add_listen_port)
-                            .desired_width(120.0),
-                    );
-                    ui.end_row();
+            if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                egui::Grid::new("add_server_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Listen Port:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.add_listen_port)
+                                .desired_width(120.0),
+                        );
+                        ui.end_row();
 
-                    ui.label("Remote Host:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut app.add_remote_host)
-                            .desired_width(180.0)
-                            .hint_text("e.g. 10.0.0.2"),
-                    );
-                    ui.end_row();
+                        ui.label("Remote Host:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.add_remote_host)
+                                .desired_width(180.0)
+                                .hint_text("e.g. 10.0.0.2"),
+                        );
+                        ui.end_row();
 
-                    ui.label("Remote Port:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut app.add_remote_port)
-                            .desired_width(120.0),
-                    );
-                    ui.end_row();
+                        ui.label("Remote Port:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.add_remote_port)
+                                .desired_width(120.0),
+                        );
+                        ui.end_row();
 
-                    ui.label("Max Clients:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut app.add_max_clients)
-                            .desired_width(80.0),
-                    );
-                    ui.end_row();
+                        ui.label("Max Clients:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.add_max_clients)
+                                .desired_width(80.0),
+                        );
+                        ui.end_row();
 
-                    ui.label("Session Timeout:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut app.add_timeout)
-                            .desired_width(80.0),
-                    );
-                    ui.end_row();
+                        ui.label("Session Timeout:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.add_timeout)
+                                .desired_width(80.0),
+                        );
+                        ui.end_row();
 
-                    ui.label("Hostname Tag:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut app.add_hostname_tag)
-                            .desired_width(180.0)
-                            .hint_text("e.g. [PROXY]"),
-                    );
-                    ui.end_row();
-                });
+                        ui.label("Hostname Tag:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.add_hostname_tag)
+                                .desired_width(180.0)
+                                .hint_text("e.g. [PROXY]"),
+                        );
+                        ui.end_row();
+                    });
+            }
+
+            // Collect form values before the horizontal layout
+            let form_data = app.proxy_states.get(&proxy_id).map(|state| {
+                (
+                    state.add_listen_port.trim().parse::<u16>(),
+                    state.add_remote_port.trim().parse::<u16>(),
+                    state.add_max_clients.trim().parse::<i64>(),
+                    state.add_timeout.trim().parse::<i64>(),
+                    state.add_remote_host.trim().to_string(),
+                    state.add_hostname_tag.trim().to_string(),
+                )
+            });
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -427,52 +568,56 @@ fn show_add_server_modal(app: &mut App, ctx: &egui::Context) {
                     )
                     .clicked()
                 {
-                    let listen_port = app.add_listen_port.trim().parse::<u16>();
-                    let remote_port = app.add_remote_port.trim().parse::<u16>();
-                    let max_clients = app.add_max_clients.trim().parse::<i64>();
-                    let timeout = app.add_timeout.trim().parse::<i64>();
-                    let remote_host = app.add_remote_host.trim().to_string();
-
-                    if remote_host.is_empty() {
-                        app.log("Remote host is required.");
-                    } else if let (Ok(lp), Ok(rp), Ok(mc), Ok(to)) =
-                        (listen_port, remote_port, max_clients, timeout)
-                    {
-                        let tag = app.add_hostname_tag.trim().to_string();
-                        app.send_add_server(
-                            lp,
-                            &remote_host,
-                            rp,
-                            mc,
-                            to,
-                            &tag,
-                        );
-                        app.show_add_server = false;
-                        // Reset form
-                        app.add_listen_port = "27960".to_string();
-                        app.add_remote_host = String::new();
-                        app.add_remote_port = "27960".to_string();
-                        app.add_max_clients = "20".to_string();
-                        app.add_timeout = "30".to_string();
-                        app.add_hostname_tag = String::new();
-                    } else {
-                        app.log("Invalid port or numeric value.");
+                    if let Some((listen_port, remote_port, max_clients, timeout, remote_host, tag)) = form_data {
+                        if remote_host.is_empty() {
+                            if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                                state.log("Remote host is required.");
+                            }
+                        } else if let (Ok(lp), Ok(rp), Ok(mc), Ok(to)) =
+                            (listen_port, remote_port, max_clients, timeout)
+                        {
+                            if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                                state.show_add_server = false;
+                                state.add_listen_port = "27960".to_string();
+                                state.add_remote_host = String::new();
+                                state.add_remote_port = "27960".to_string();
+                                state.add_max_clients = "20".to_string();
+                                state.add_timeout = "30".to_string();
+                                state.add_hostname_tag = String::new();
+                            }
+                            app.send_add_server(
+                                proxy_id, lp, &remote_host, rp, mc, to, &tag,
+                            );
+                        } else {
+                            if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                                state.log("Invalid port or numeric value.");
+                            }
+                        }
                     }
                 }
 
                 if ui.button("Cancel").clicked() {
-                    app.show_add_server = false;
+                    if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                        state.show_add_server = false;
+                    }
                 }
             });
         });
 
     if !open {
-        app.show_add_server = false;
+        if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+            state.show_add_server = false;
+        }
     }
 }
 
-fn show_remove_confirm_modal(app: &mut App, ctx: &egui::Context) {
-    if let Some(srv_idx) = app.confirm_remove {
+fn show_remove_confirm_modal(app: &mut App, ctx: &egui::Context, proxy_id: u64) {
+    let confirm = app
+        .proxy_states
+        .get(&proxy_id)
+        .and_then(|s| s.confirm_remove);
+
+    if let Some(srv_idx) = confirm {
         egui::Window::new("Confirm Remove Server")
             .collapsible(false)
             .resizable(false)
@@ -491,14 +636,18 @@ fn show_remove_confirm_modal(app: &mut App, ctx: &egui::Context) {
                         )
                         .clicked()
                     {
-                        app.send_remove_server(srv_idx);
-                        app.confirm_remove = None;
-                        if app.active_tab > 0 {
-                            app.active_tab -= 1;
+                        app.send_remove_server(proxy_id, srv_idx);
+                        if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                            state.confirm_remove = None;
+                            if state.active_tab > 0 {
+                                state.active_tab -= 1;
+                            }
                         }
                     }
                     if ui.button("Cancel").clicked() {
-                        app.confirm_remove = None;
+                        if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                            state.confirm_remove = None;
+                        }
                     }
                 });
             });

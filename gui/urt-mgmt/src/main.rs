@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod config;
 mod net;
 mod protocol;
+mod proxy_entry;
 mod ui;
 mod worker;
 

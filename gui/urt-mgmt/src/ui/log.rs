@@ -13,11 +13,18 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 ui.heading("Log");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("Clear").clicked() {
-                        app.log_entries.clear();
+                        if let Some(state) = app.active_state_mut() {
+                            state.log_entries.clear();
+                        }
                     }
                 });
             });
             ui.separator();
+
+            let log_len = app
+                .active_state()
+                .map(|s| s.log_entries.len())
+                .unwrap_or(0);
 
             let text_style = egui::TextStyle::Monospace;
             let row_height = ui.text_style_height(&text_style);
@@ -25,18 +32,20 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .auto_shrink([false; 2])
-                .show_rows(ui, row_height, app.log_entries.len(), |ui, range| {
-                    for i in range {
-                        if let Some((ts, msg)) = app.log_entries.get(i) {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(120, 120, 140),
-                                    ts,
-                                );
-                                ui.label(
-                                    egui::RichText::new(msg).monospace(),
-                                );
-                            });
+                .show_rows(ui, row_height, log_len, |ui, range| {
+                    if let Some(state) = app.active_state() {
+                        for i in range {
+                            if let Some((ts, msg)) = state.log_entries.get(i) {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(120, 120, 140),
+                                        ts,
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(msg).monospace(),
+                                    );
+                                });
+                            }
                         }
                     }
                 });
