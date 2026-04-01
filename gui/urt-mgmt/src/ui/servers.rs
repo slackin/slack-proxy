@@ -1,10 +1,31 @@
 use std::collections::HashSet;
+use std::net::UdpSocket;
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use crate::app::App;
 use crate::protocol::ServerInfo;
+
+/// Starting port for auto-suggested listen ports.
+const DEFAULT_LISTEN_PORT_START: u16 = 27990;
+
+/// Compute the next available listen port starting from `DEFAULT_LISTEN_PORT_START`,
+/// skipping any port already used by a server in `servers`.
+fn next_available_port(servers: &[ServerInfo]) -> String {
+    let used: HashSet<u16> = servers.iter().map(|s| s.listen_port).collect();
+    let mut port = DEFAULT_LISTEN_PORT_START;
+    while used.contains(&port) && port < u16::MAX {
+        port += 1;
+    }
+    port.to_string()
+}
+
+/// Check whether a UDP port is already bound on this machine.
+/// Returns true if the port appears to be in use.
+fn is_port_in_use(port: u16) -> bool {
+    UdpSocket::bind(("0.0.0.0", port)).is_err()
+}
 
 /// Render the server tabs and content in the central panel.
 pub fn show(app: &mut App, ctx: &egui::Context) {
@@ -104,6 +125,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     .clicked()
                 {
                     if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                        state.add_listen_port = next_available_port(&state.server_data);
                         state.show_add_server = true;
                     }
                 }
@@ -545,17 +567,24 @@ fn show_add_server_modal(app: &mut App, ctx: &egui::Context, proxy_id: u64) {
                     });
             }
 
-            // Collect form values before the horizontal layout
-            let form_data = app.proxy_states.get(&proxy_id).map(|state| {
-                (
-                    state.add_listen_port.trim().parse::<u16>(),
-                    state.add_remote_port.trim().parse::<u16>(),
-                    state.add_max_clients.trim().parse::<i64>(),
-                    state.add_timeout.trim().parse::<i64>(),
-                    state.add_remote_host.trim().to_string(),
-                    state.add_hostname_tag.trim().to_string(),
-                )
-            });
+            // Collect form values and used ports before the horizontal layout
+            let (form_data, used_ports) = {
+                let state = app.proxy_states.get(&proxy_id);
+                let form = state.map(|s| {
+                    (
+                        s.add_listen_port.trim().parse::<u16>(),
+                        s.add_remote_port.trim().parse::<u16>(),
+                        s.add_max_clients.trim().parse::<i64>(),
+                        s.add_timeout.trim().parse::<i64>(),
+                        s.add_remote_host.trim().to_string(),
+                        s.add_hostname_tag.trim().to_string(),
+                    )
+                });
+                let ports: Vec<u16> = state
+                    .map(|s| s.server_data.iter().map(|srv| srv.listen_port).collect())
+                    .unwrap_or_default();
+                (form, ports)
+            };
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -576,18 +605,36 @@ fn show_add_server_modal(app: &mut App, ctx: &egui::Context, proxy_id: u64) {
                         } else if let (Ok(lp), Ok(rp), Ok(mc), Ok(to)) =
                             (listen_port, remote_port, max_clients, timeout)
                         {
-                            if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
-                                state.show_add_server = false;
-                                state.add_listen_port = "27960".to_string();
-                                state.add_remote_host = String::new();
-                                state.add_remote_port = "27960".to_string();
-                                state.add_max_clients = "20".to_string();
-                                state.add_timeout = "30".to_string();
-                                state.add_hostname_tag = String::new();
+                            // Check if listen port is already used by another server on this proxy
+                            if used_ports.contains(&lp) {
+                                if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                                    state.log(&format!(
+                                        "Port {} is already in use by another server on this proxy.",
+                                        lp
+                                    ));
+                                }
+                            } else if is_port_in_use(lp) {
+                                // Check if the port is already bound on this machine
+                                if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                                    state.log(&format!(
+                                        "Port {} is already in use on this machine.",
+                                        lp
+                                    ));
+                                }
+                            } else {
+                                if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
+                                    state.show_add_server = false;
+                                    state.add_listen_port = next_available_port(&state.server_data);
+                                    state.add_remote_host = String::new();
+                                    state.add_remote_port = "27960".to_string();
+                                    state.add_max_clients = "20".to_string();
+                                    state.add_timeout = "30".to_string();
+                                    state.add_hostname_tag = String::new();
+                                }
+                                app.send_add_server(
+                                    proxy_id, lp, &remote_host, rp, mc, to, &tag,
+                                );
                             }
-                            app.send_add_server(
-                                proxy_id, lp, &remote_host, rp, mc, to, &tag,
-                            );
                         } else {
                             if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
                                 state.log("Invalid port or numeric value.");

@@ -35,7 +35,7 @@
 #include <netdb.h>
 
 /* Default values — must match the CLI defaults in main.c */
-#define DEFAULT_LISTEN_PORT   27960
+#define DEFAULT_LISTEN_PORT   27990
 #define DEFAULT_REMOTE_PORT   27960
 #define DEFAULT_MAX_CLIENTS   20
 #define DEFAULT_TIMEOUT       30

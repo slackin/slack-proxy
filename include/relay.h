@@ -36,7 +36,7 @@ typedef struct mgmt_config mgmt_config_t;
  *   - remote_addr (must have a non-zero IP and port)
  *
  * Optional fields (have sensible defaults if zero-initialised):
- *   - listen_port        (default: 27960)
+ *   - listen_port        (default: 27990)
  *   - max_clients        (default: 20)
  *   - session_timeout    (default: 30 seconds)
  *   - hostname_tag       (default: NULL — no rewriting)
@@ -47,7 +47,7 @@ typedef struct mgmt_config mgmt_config_t;
  */
 typedef struct {
     /* --- Network settings --- */
-    uint16_t            listen_port;     /* Local UDP port to bind (e.g. 27960)       */
+    uint16_t            listen_port;     /* Local UDP port to bind (e.g. 27990)       */
     struct sockaddr_in  remote_addr;     /* Real game server address (WireGuard IP:port) */
 
     /* --- Session management --- */

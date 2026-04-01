@@ -10,7 +10,7 @@
  *     remote-host       Real game server address (IP or hostname[:port])
  *
  *   Optional (defaults shown):
- *     listen-port       = 27960
+ *     listen-port       = 27990
  *     remote-port       = 27960
  *     max-clients       = 20
  *     timeout           = 30       (seconds, minimum 5)
@@ -29,7 +29,7 @@
  *   debug = false
  *
  *   [server:dallas]
- *   listen-port   = 27960
+ *   listen-port   = 27990
  *   remote-host   = 10.0.0.2
  *   remote-port   = 27960
  *   max-clients   = 20

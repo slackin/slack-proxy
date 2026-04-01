@@ -38,7 +38,7 @@
 #define MGMT_SERVER_INDEX   0x7FFFFFFF
 
 /* Default TCP port for the management API. */
-#define MGMT_DEFAULT_PORT   27961
+#define MGMT_DEFAULT_PORT   29990
 
 /* Maximum concurrent management client connections. */
 #define MGMT_MAX_CLIENTS    4
@@ -63,7 +63,7 @@
  * when an API key is provided via --mgmt-key or mgmt-key config key).
  */
 typedef struct mgmt_config {
-    uint16_t            port;         /* TCP listen port (default 27961)      */
+    uint16_t            port;         /* TCP listen port (default 29990)      */
     struct sockaddr_in  listen_addr;  /* Resolved listen address              */
     const char         *api_key;      /* Shared secret for authentication     */
     int                 enabled;      /* Non-zero if management API is active */

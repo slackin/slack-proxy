@@ -26,7 +26,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         app.editing_proxy_id = None;
                         app.edit_name = String::new();
                         app.edit_host = "127.0.0.1".to_string();
-                        app.edit_port = "27961".to_string();
+                        app.edit_port = "29990".to_string();
                         app.edit_api_key = String::new();
                         app.edit_auto_connect = false;
                         app.show_add_proxy = true;
@@ -75,7 +75,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             .corner_radius(4.0)
                             .inner_margin(egui::Margin::symmetric(6, 4));
 
-                        let resp = frame
+                        let inner = frame
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
@@ -98,8 +98,14 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                         );
                                     });
                                 });
-                            })
-                            .response;
+                            });
+
+                        // Make the frame area interactive
+                        let resp = ui.interact(
+                            inner.response.rect,
+                            egui::Id::new(("proxy_entry", *id)),
+                            egui::Sense::click(),
+                        );
 
                         if resp.clicked() {
                             action = Some(SidebarAction::Select(*id));
@@ -223,7 +229,7 @@ fn show_proxy_modal(app: &mut App, ctx: &egui::Context) {
                     ui.add(
                         egui::TextEdit::singleline(&mut app.edit_port)
                             .desired_width(80.0)
-                            .hint_text("27961"),
+                            .hint_text("29990"),
                     );
                     ui.end_row();
 

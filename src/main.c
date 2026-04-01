@@ -27,7 +27,7 @@
 #include <errno.h>
 
 /* Default values for optional CLI arguments */
-#define DEFAULT_LISTEN_PORT   27960
+#define DEFAULT_LISTEN_PORT   27990
 #define DEFAULT_REMOTE_PORT   27960
 #define DEFAULT_MAX_CLIENTS   20
 #define DEFAULT_TIMEOUT       30   /* seconds */
@@ -242,7 +242,7 @@ static void usage(const char *prog)
         "  only the management port.  Servers can then be added via the GUI client.\n"
         "\n"
         "Examples:\n"
-        "  %s -r 10.0.0.2 -l 27960 -p 27960 -T \"[PROXY]\" -M master.urbanterror.info\n"
+        "  %s -r 10.0.0.2 -l 27990 -p 27960 -T \"[PROXY]\" -M master.urbanterror.info\n"
         "  %s -c /etc/urt-proxy.conf\n"
         "  %s --mgmt-key-file ~/.urt-proxy.key\n",
         prog,

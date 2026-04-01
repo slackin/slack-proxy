@@ -17,8 +17,8 @@ debug = false
 # Requires an API key; without one the management API is disabled.
 # mgmt-key = my-secret-api-key
 
-# Management API listen port (default: 27961)
-# mgmt-port = 27961
+# Management API listen port (default: 29990)
+# mgmt-port = 29990
 
 # Management API listen address (default: 127.0.0.1)
 # Set to 0.0.0.0 to allow remote connections (use with caution)
@@ -26,7 +26,7 @@ debug = false
 
 [server:dallas]
 # Local UDP port that clients connect to
-listen-port = 27960
+listen-port = 27990
 
 # Real game server address (WireGuard IP) — REQUIRED
 remote-host = 10.0.0.2
@@ -57,7 +57,7 @@ query-timeout = 5
 master-server = master.urbanterror.info
 
 [server:chicago]
-listen-port = 27961
+listen-port = 27991
 remote-host = 10.0.0.3
 remote-port = 27960
 max-clients = 20
