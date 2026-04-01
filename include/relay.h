@@ -16,10 +16,25 @@
 #define RELAY_MAX_MASTERS 4
 
 /*
- * relay_config_t — Runtime configuration for the relay proxy.
+ * relay_config_t — Runtime configuration for one proxied server.
  *
- * Populated from command-line arguments in main() and passed to relay_run().
- * All fields must be set before calling relay_run().
+ * Populated from command-line arguments in main() (single-server mode)
+ * or from config_load() (multi-server config file mode), then passed
+ * to relay_run().  All fields must be set before calling relay_run();
+ * use the init helpers in config.c or the defaults in main.c.
+ *
+ * Required fields:
+ *   - remote_addr (must have a non-zero IP and port)
+ *
+ * Optional fields (have sensible defaults if zero-initialised):
+ *   - listen_port        (default: 27960)
+ *   - max_clients        (default: 20)
+ *   - session_timeout    (default: 30 seconds)
+ *   - hostname_tag       (default: NULL — no rewriting)
+ *   - max_query_sessions (default: 100)
+ *   - query_timeout      (default: 5 seconds)
+ *   - max_new_per_sec    (default: 5)
+ *   - master_addrs/count (default: 0 — no master registration)
  */
 typedef struct {
     /* --- Network settings --- */
@@ -46,17 +61,19 @@ typedef struct {
 /*
  * relay_run — Run the main relay event loop (blocking).
  *
- * Sets up a UDP listen socket, an epoll instance, and a session hash map,
- * then enters the main loop: forwarding client packets to the real server
- * and relaying responses back. Handles session creation, timeout sweeps,
- * rate limiting, and optional hostname rewriting.
+ * Sets up a UDP listen socket per server, a shared epoll instance, and
+ * per-server session hash maps, then enters the main loop: forwarding
+ * client packets to the correct real server and relaying responses back.
+ * Handles session creation, timeout sweeps, rate limiting, and optional
+ * hostname rewriting — all independently per server instance.
  *
  * The loop runs until SIGINT or SIGTERM is received, at which point it
  * performs a clean shutdown (closes all sockets, frees all memory).
  *
- * @param cfg  Pointer to a fully-populated relay_config_t.
- * @return     0 on clean shutdown, -1 on fatal error.
+ * @param cfgs          Array of fully-populated relay_config_t structs.
+ * @param server_count  Number of entries in @a cfgs (1 or more).
+ * @return              0 on clean shutdown, -1 on fatal error.
  */
-int relay_run(const relay_config_t *cfg);
+int relay_run(const relay_config_t *cfgs, int server_count);
 
 #endif

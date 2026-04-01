@@ -9,6 +9,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "relay.h"
+#include "config.h"
 #include "q3proto.h"
 #include "log.h"
 
@@ -41,10 +42,14 @@ static void usage(const char *prog)
         "\n"
         "Urban Terror UDP Proxy — transparent Q3 relay over WireGuard\n"
         "\n"
-        "Required:\n"
+        "Required (single-server mode):\n"
         "  -r, --remote-host HOST    Real server IP (WireGuard address)\n"
         "\n"
-        "Optional:\n"
+        "Config file mode (supports multiple servers):\n"
+        "  -c, --config FILE         Load servers from an INI config file\n"
+        "                            (ignores -r, -l, -p, -m, -t, -T, -R, -Q, -q, -M)\n"
+        "\n"
+        "Optional (single-server mode):\n"
         "  -l, --listen-port PORT    Local listen port (default: %d)\n"
         "  -p, --remote-port PORT    Real server port (default: %d)\n"
         "  -m, --max-clients N       Max concurrent clients (default: %d)\n"
@@ -57,17 +62,20 @@ static void usage(const char *prog)
         "  -M, --master-server HOST[:PORT]\n"
         "                            Master server for server list registration\n"
         "                            (port defaults to 27900, may be repeated up to %d)\n"
+        "\n"
+        "Common:\n"
         "  -d, --debug               Enable debug logging\n"
         "  -h, --help                Show this help\n"
         "\n"
-        "Example:\n"
-        "  %s -r 10.0.0.2 -l 27960 -p 27960 -T \"[PROXY]\" -M master.urbanterror.info\n",
+        "Examples:\n"
+        "  %s -r 10.0.0.2 -l 27960 -p 27960 -T \"[PROXY]\" -M master.urbanterror.info\n"
+        "  %s -c /etc/urt-proxy.conf\n",
         prog,
         DEFAULT_LISTEN_PORT, DEFAULT_REMOTE_PORT,
         DEFAULT_MAX_CLIENTS, DEFAULT_TIMEOUT, DEFAULT_RATE_LIMIT,
         DEFAULT_MAX_QUERY, DEFAULT_QUERY_TIMEOUT,
         RELAY_MAX_MASTERS,
-        prog);
+        prog, prog);
 }
 
 int main(int argc, char **argv)
@@ -83,6 +91,7 @@ int main(int argc, char **argv)
 
     uint16_t remote_port = DEFAULT_REMOTE_PORT;
     const char *remote_host = NULL;
+    const char *config_file = NULL;
     int debug = 0;
 
     /* Long option definitions for getopt_long */
@@ -97,6 +106,7 @@ int main(int argc, char **argv)
         {"max-query-sessions", required_argument, NULL, 'Q'},
         {"query-timeout",required_argument, NULL, 'q'},
         {"master-server",required_argument, NULL, 'M'},
+        {"config",       required_argument, NULL, 'c'},
         {"debug",        no_argument,       NULL, 'd'},
         {"help",         no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0}
@@ -104,10 +114,13 @@ int main(int argc, char **argv)
 
     /* --- Parse command-line arguments --- */
     int opt;
-    while ((opt = getopt_long(argc, argv, "r:l:p:m:t:T:R:Q:q:M:dh", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "r:l:p:m:t:T:R:Q:q:M:c:dh", long_opts, NULL)) != -1) {
         switch (opt) {
-        case 'r':   /* --remote-host (required) */
+        case 'r':   /* --remote-host (required in single-server mode) */
             remote_host = optarg;
+            break;
+        case 'c':   /* --config FILE */
+            config_file = optarg;
             break;
         case 'l': { /* --listen-port: local UDP port to bind */
             long v = strtol(optarg, NULL, 10);
@@ -145,9 +158,13 @@ int main(int argc, char **argv)
         case 'q':   /* --query-timeout: browser query inactivity timeout */
             cfg.query_timeout = (int)strtol(optarg, NULL, 10);
             break;
-        case 'M': { /* --master-server HOST[:PORT] — register with a master server */
+        case 'M': { /* --master-server HOST[:PORT] — register with a master server.
+                     * This parsing logic mirrors resolve_host_port() in config.c
+                     * but is kept inline here to avoid adding a public API just
+                     * for the CLI path. */
             if (cfg.master_count >= RELAY_MAX_MASTERS) {
-                fprintf(stderr, "Error: max %d master servers\n", RELAY_MAX_MASTERS);
+                fprintf(stderr, "Error: cannot specify more than %d master "
+                        "servers\n", RELAY_MAX_MASTERS);
                 return 1;
             }
 
@@ -208,9 +225,38 @@ int main(int argc, char **argv)
         }
     }
 
-    /* --remote-host is the only required argument */
+    /* ================================================================ */
+    /*  Config-file mode: load from INI, then run.                      */
+    /*                                                                  */
+    /*  When -c is given, all single-server CLI flags (-r, -l, -p, etc) */
+    /*  are ignored — the config file is the sole source of truth.      */
+    /*  Only -d (debug) is honoured as a CLI override so the operator   */
+    /*  can enable verbose logging without editing the config file.     */
+    /* ================================================================ */
+    if (config_file) {
+        proxy_config_t pcfg;
+        if (config_load(config_file, &pcfg) < 0)
+            return 1;
+
+        /* -d / --debug on the CLI overrides the config file */
+        if (debug)
+            pcfg.debug = 1;
+
+        log_init(pcfg.debug ? LOG_DEBUG : LOG_INFO);
+        log_info("urt-proxy starting (%d server(s) from %s)",
+                 pcfg.server_count, config_file);
+
+        return relay_run(pcfg.servers, pcfg.server_count) == 0 ? 0 : 1;
+    }
+
+    /* ================================================================ */
+    /*  Single-server CLI mode (original behaviour)                     */
+    /* ================================================================ */
+
+    /* --remote-host is required in single-server mode */
     if (!remote_host) {
-        fprintf(stderr, "Error: --remote-host is required\n\n");
+        fprintf(stderr, "Error: --remote-host is required (or use --config "
+                "for multi-server mode)\n\n");
         usage(argv[0]);
         return 1;
     }
@@ -220,36 +266,38 @@ int main(int argc, char **argv)
     cfg.remote_addr.sin_family = AF_INET;
     cfg.remote_addr.sin_port   = htons(remote_port);
     if (inet_pton(AF_INET, remote_host, &cfg.remote_addr.sin_addr) != 1) {
-        fprintf(stderr, "Error: invalid remote host IP: %s\n", remote_host);
+        fprintf(stderr, "Error: '%s' is not a valid IPv4 address — use a "
+                "dotted-quad (e.g. 10.0.0.2)\n", remote_host);
         return 1;
     }
 
     /* --- Validate parameter ranges --- */
     if (cfg.max_clients < 1 || cfg.max_clients > 1000) {
-        fprintf(stderr, "Error: --max-clients must be 1-1000\n");
+        fprintf(stderr, "Error: --max-clients must be between 1 and 1000\n");
         return 1;
     }
     if (cfg.session_timeout < 5) {
-        fprintf(stderr, "Error: --timeout must be >= 5\n");
+        fprintf(stderr, "Error: --timeout must be at least 5 seconds\n");
         return 1;
     }
     if (cfg.max_new_per_sec < 1) {
-        fprintf(stderr, "Error: --rate-limit must be >= 1\n");
+        fprintf(stderr, "Error: --rate-limit must be at least 1 session/sec\n");
         return 1;
     }
     if (cfg.max_query_sessions < 1 || cfg.max_query_sessions > 1000) {
-        fprintf(stderr, "Error: --max-query-sessions must be 1-1000\n");
+        fprintf(stderr, "Error: --max-query-sessions must be between 1 and "
+                "1000\n");
         return 1;
     }
     if (cfg.query_timeout < 1) {
-        fprintf(stderr, "Error: --query-timeout must be >= 1\n");
+        fprintf(stderr, "Error: --query-timeout must be at least 1 second\n");
         return 1;
     }
 
     /* --- Initialise logging and print startup banner --- */
     log_init(debug ? LOG_DEBUG : LOG_INFO);
 
-    log_info("urt-proxy starting");
+    log_info("urt-proxy starting (single-server mode)");
     log_info("  Listen port:    %u", cfg.listen_port);
     log_info("  Remote server:  %s:%u", remote_host, remote_port);
     log_info("  Max clients:    %d", cfg.max_clients);
@@ -272,5 +320,5 @@ int main(int argc, char **argv)
     }
 
     /* Hand off to the blocking event loop — returns on shutdown or error */
-    return relay_run(&cfg) == 0 ? 0 : 1;
+    return relay_run(&cfg, 1) == 0 ? 0 : 1;
 }

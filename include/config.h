@@ -1,0 +1,75 @@
+/*
+ * config.h — INI-style configuration file parser for urt-proxy.
+ *
+ * Supports a [global] section for process-wide settings and multiple
+ * [server:<name>] sections, each producing a relay_config_t that can
+ * be handed to relay_run().
+ *
+ * Per-server keys:
+ *   Required:
+ *     remote-host       Real game server address (IP or hostname[:port])
+ *
+ *   Optional (defaults shown):
+ *     listen-port       = 27960
+ *     remote-port       = 27960
+ *     max-clients       = 20
+ *     timeout           = 30       (seconds, minimum 5)
+ *     hostname-tag      = (none)   (prefix for sv_hostname)
+ *     rate-limit        = 5        (new sessions per second)
+ *     max-query-sessions = 100
+ *     query-timeout     = 5        (seconds)
+ *     master-server     = (none)   (repeatable, up to 4)
+ *
+ * Global keys:
+ *   debug = false
+ *
+ * Config file format example:
+ *
+ *   [global]
+ *   debug = false
+ *
+ *   [server:dallas]
+ *   listen-port   = 27960
+ *   remote-host   = 10.0.0.2
+ *   remote-port   = 27960
+ *   max-clients   = 20
+ *   timeout       = 30
+ *   hostname-tag  = [DALLAS]
+ *   rate-limit    = 5
+ *   max-query-sessions = 100
+ *   query-timeout = 5
+ *   master-server = master.urbanterror.info
+ */
+
+#ifndef URT_CONFIG_H
+#define URT_CONFIG_H
+
+#include "relay.h"
+
+/* Maximum number of server sections allowed in a config file. */
+#define CONFIG_MAX_SERVERS 32
+
+/*
+ * proxy_config_t — Top-level configuration loaded from a config file.
+ *
+ * Contains global settings plus an array of per-server relay configs.
+ */
+typedef struct {
+    int             debug;                            /* Global debug flag (from [global]) */
+    relay_config_t  servers[CONFIG_MAX_SERVERS];       /* Per-server configurations         */
+    int             server_count;                      /* Number of servers loaded           */
+} proxy_config_t;
+
+/*
+ * config_load — Parse an INI config file and populate a proxy_config_t.
+ *
+ * Reads the file line-by-line, resolves hostnames, and validates all
+ * parameter ranges. On error, logs a message and returns -1.
+ *
+ * @param path  Path to the INI config file.
+ * @param out   Pointer to an uninitialised proxy_config_t to populate.
+ * @return      0 on success, -1 on error (details logged to stderr).
+ */
+int config_load(const char *path, proxy_config_t *out);
+
+#endif

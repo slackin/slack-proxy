@@ -142,7 +142,12 @@ typedef void (*session_iter_fn)(session_t *s, void *ctx);
  *
  * Calls fn(session, ctx) for every active session. Used by the timeout
  * sweep to find expired sessions.  Do not insert or remove sessions
- * from within the callback.
+ * from within the callback — doing so invalidates the iteration and
+ * corrupts the hash tables.  The timeout sweep works around this by
+ * collecting pointers in the callback, then removing in a second pass.
+ *
+ * Thread safety: this function is NOT thread-safe.  The codebase is
+ * single-threaded, so no synchronisation is needed.
  *
  * @param map  The session map.
  * @param fn   Callback invoked for each active session.

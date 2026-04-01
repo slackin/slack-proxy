@@ -15,10 +15,17 @@
  *   8. Sends periodic heartbeat packets to master server(s) so the
  *      proxy appears in the UrT server browser / master list.
  *
+ * Supports multi-server mode: when multiple relay_config_t entries are
+ * passed to relay_run(), each server gets its own listen socket, session
+ * map, rate limiter, and sweep/heartbeat timers — all multiplexed on a
+ * single shared epoll instance.  The server index is packed into the
+ * upper 32 bits of epoll_data.u64 so the event loop can route each
+ * event to the correct server_instance_t.
+ *
  * The loop exits cleanly on SIGINT or SIGTERM, closing all sockets and
  * freeing all allocated memory.
  *
- * Data flow:
+ * Data flow (per server):
  *
  *   Player  ─── UDP ───►  listen_fd  ─── send() ───►  relay_fd  ─── WG ───►  Server
  *   Player  ◄── sendto ──  listen_fd  ◄── recv() ────  relay_fd  ◄── WG ────  Server
@@ -357,6 +364,57 @@ static void send_heartbeats(int listen_fd, const relay_config_t *cfg)
 }
 
 /* ================================================================== */
+/*  Server instance — per-server runtime state                        */
+/* ================================================================== */
+
+/*
+ * server_instance_t — All runtime state for a single proxied server.
+ *
+ * When multiple [server:*] sections are configured, relay_run() creates
+ * one instance per section.  Each has its own listen socket, session
+ * map, rate limiter, and sweep/heartbeat timers.
+ */
+typedef struct {
+    const relay_config_t *cfg;        /* Points into the cfgs array          */
+    int                   listen_fd;  /* Public-facing UDP socket            */
+    session_map_t         sessions;   /* Per-server session hash map         */
+    int                   query_count;/* Active browser query sessions       */
+    rate_limiter_t        rate_limiter;
+    time_t                last_sweep;
+    time_t                last_heartbeat; /* 0 → fire immediately on start   */
+    int                   index;      /* Server index (for epoll routing)    */
+} server_instance_t;
+
+/* ------------------------------------------------------------------ */
+/*  Epoll data packing helpers                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Pack a server index and file descriptor into epoll_data.u64.
+ *
+ * Layout: upper 32 bits = server index, lower 32 bits = fd.
+ *
+ * This encoding assumes file descriptors fit in 32 bits, which is
+ * true on all current Linux kernels (fds are non-negative ints).
+ * It lets us route every epoll event to the correct server_instance_t
+ * without maintaining a separate fd-to-server lookup table.
+ */
+static inline uint64_t pack_epoll_data(int server_index, int fd)
+{
+    return ((uint64_t)(uint32_t)server_index << 32) | (uint64_t)(uint32_t)fd;
+}
+
+static inline int unpack_server_index(uint64_t data)
+{
+    return (int)(data >> 32);
+}
+
+static inline int unpack_fd(uint64_t data)
+{
+    return (int)(data & 0xFFFFFFFF);
+}
+
+/* ================================================================== */
 /*  Main event loop                                                   */
 /* ================================================================== */
 
@@ -365,18 +423,19 @@ static void send_heartbeats(int listen_fd, const relay_config_t *cfg)
  *
  * High-level flow:
  *   1. Install signal handlers (SIGINT, SIGTERM → g_running = 0).
- *   2. Create the listen socket and an epoll instance.
- *   3. Initialise the session hash map and rate limiter.
+ *   2. Create an epoll instance.
+ *   3. For each server config: create listen socket, session map,
+ *      rate limiter; register listen fd with epoll.
  *   4. Loop:
  *      a. epoll_wait() with a timeout equal to SWEEP_INTERVAL.
- *      b. For each ready fd:
+ *      b. For each ready fd, unpack the server index from epoll data:
  *         - listen_fd: receive client packet, find/create session, forward.
  *         - relay_fd:  receive server response, find session, relay back.
- *      c. Every SWEEP_INTERVAL seconds, sweep expired sessions.
- *      d. Every Q3_HEARTBEAT_INTERVAL seconds, send heartbeats to masters.
- *   5. On shutdown: close every open socket, free the map.
+ *      c. Every SWEEP_INTERVAL seconds, sweep expired sessions (all servers).
+ *      d. Every Q3_HEARTBEAT_INTERVAL seconds, send heartbeats (all servers).
+ *   5. On shutdown: close every open socket, free all maps.
  */
-int relay_run(const relay_config_t *cfg)
+int relay_run(const relay_config_t *cfgs, int server_count)
 {
     /* --- Install SIGINT/SIGTERM handlers for graceful shutdown --- */
     struct sigaction sa = {0};
@@ -384,72 +443,85 @@ int relay_run(const relay_config_t *cfg)
     sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    /* --- Create the public-facing listen socket --- */
-    int listen_fd = create_listen_socket(cfg->listen_port);
-    if (listen_fd < 0)
-        return -1;
-
     /* --- Create the epoll instance --- */
     int epoll_fd = epoll_create1(0);
     if (epoll_fd < 0) {
         log_error("epoll_create1(): %s", strerror(errno));
-        close(listen_fd);
         return -1;
     }
 
-    /* Register the listen socket for read events */
-    struct epoll_event ev = {0};
-    ev.events  = EPOLLIN;
-    ev.data.fd = listen_fd;
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev);
-
-    /* --- Initialise the session hash map --- */
-    session_map_t sessions;
-    int total_capacity = cfg->max_clients + cfg->max_query_sessions;
-    if (session_map_init(&sessions, total_capacity) < 0) {
-        log_error("Failed to initialize session map");
-        close(listen_fd);
+    /* --- Create per-server instances --- */
+    server_instance_t *servers = calloc((size_t)server_count,
+                                        sizeof(server_instance_t));
+    if (!servers) {
+        log_error("Failed to allocate server instances");
         close(epoll_fd);
         return -1;
     }
 
-    /* --- Initialise the rate limiter --- */
-    rate_limiter_t rate_limiter = {0};
-    rate_limiter.max_per_sec = cfg->max_new_per_sec;
+    int init_count = 0; /* How many servers we've successfully initialised */
 
-    /* Log the forwarding target for operator visibility */
-    char remote_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &cfg->remote_addr.sin_addr, remote_str, sizeof(remote_str));
-    log_info("Forwarding to %s:%u via WireGuard",
-             remote_str, ntohs(cfg->remote_addr.sin_port));
-    log_info("Max clients: %d, session timeout: %ds, query pool: %d, query timeout: %ds",
-             cfg->max_clients, cfg->session_timeout,
-             cfg->max_query_sessions, cfg->query_timeout);
+    for (int s = 0; s < server_count; s++) {
+        server_instance_t *srv = &servers[s];
+        srv->cfg   = &cfgs[s];
+        srv->index = s;
+
+        /* Create the public-facing listen socket */
+        srv->listen_fd = create_listen_socket(srv->cfg->listen_port);
+        if (srv->listen_fd < 0)
+            goto cleanup;
+
+        /* Initialise the session hash map */
+        int total_cap = srv->cfg->max_clients + srv->cfg->max_query_sessions;
+        if (session_map_init(&srv->sessions, total_cap) < 0) {
+            log_error("Server #%d: failed to initialize session map", s + 1);
+            close(srv->listen_fd);
+            srv->listen_fd = -1;
+            goto cleanup;
+        }
+
+        /* Initialise the rate limiter */
+        srv->rate_limiter.max_per_sec = srv->cfg->max_new_per_sec;
+
+        /* Sweep and heartbeat timers */
+        srv->last_sweep = time(NULL);
+        srv->last_heartbeat = 0; /* Fire immediately on first loop */
+
+        /* Register the listen socket with epoll */
+        struct epoll_event ev = {0};
+        ev.events   = EPOLLIN;
+        ev.data.u64 = pack_epoll_data(s, srv->listen_fd);
+        epoll_ctl(epoll_fd, EPOLL_CTL_ADD, srv->listen_fd, &ev);
+
+        /* Log the forwarding target */
+        char remote_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &srv->cfg->remote_addr.sin_addr,
+                  remote_str, sizeof(remote_str));
+        log_info("Server #%d: :%u -> %s:%u (max %d clients, %ds timeout, "
+                 "query pool %d, %ds query timeout)",
+                 s + 1, srv->cfg->listen_port,
+                 remote_str, ntohs(srv->cfg->remote_addr.sin_port),
+                 srv->cfg->max_clients, srv->cfg->session_timeout,
+                 srv->cfg->max_query_sessions, srv->cfg->query_timeout);
+
+        init_count++;
+    }
 
     /* Packet buffers — stack-allocated, reused every iteration */
-    uint8_t recv_buf[RECV_BUF_SIZE];      /* Raw received packet       */
-    uint8_t rewrite_buf[RECV_BUF_SIZE];   /* Hostname-rewritten packet */
+    uint8_t recv_buf[RECV_BUF_SIZE];
+    uint8_t rewrite_buf[RECV_BUF_SIZE];
     struct epoll_event events[MAX_EPOLL_EVENTS];
-    time_t last_sweep = time(NULL);
-    int query_count = 0;  /* Number of active browser query sessions */
-
-    /*
-     * Heartbeat timer — initialised to 0 so the first heartbeat fires
-     * immediately on startup, then every Q3_HEARTBEAT_INTERVAL seconds.
-     */
-    time_t last_heartbeat = 0;
 
     /* ============================================================== */
     /*  Main event loop                                               */
     /* ============================================================== */
     while (g_running) {
-        /* Block until packets arrive or it's time for a sweep */
         int wait_ms = SWEEP_INTERVAL * 1000;
         int nfds = epoll_wait(epoll_fd, events, MAX_EPOLL_EVENTS, wait_ms);
 
         if (nfds < 0) {
             if (errno == EINTR)
-                continue;  /* Interrupted by signal — re-check g_running */
+                continue;
             log_error("epoll_wait(): %s", strerror(errno));
             break;
         }
@@ -457,52 +529,71 @@ int relay_run(const relay_config_t *cfg)
         time_t now = time(NULL);
 
         for (int i = 0; i < nfds; i++) {
-            int fd = events[i].data.fd;
+            int srv_idx = unpack_server_index(events[i].data.u64);
+            int fd      = unpack_fd(events[i].data.u64);
 
-            if (fd == listen_fd) {
+            if (srv_idx < 0 || srv_idx >= server_count)
+                continue;
+
+            server_instance_t *srv = &servers[srv_idx];
+            const relay_config_t *cfg = srv->cfg;
+
+            if (fd == srv->listen_fd) {
                 /* ================================================== */
                 /*  Packet from a game client (on the listen socket)   */
                 /* ================================================== */
                 struct sockaddr_in client_addr;
                 socklen_t addr_len = sizeof(client_addr);
-                ssize_t n = recvfrom(listen_fd, recv_buf, sizeof(recv_buf), 0,
-                                     (struct sockaddr *)&client_addr, &addr_len);
+                ssize_t n = recvfrom(srv->listen_fd, recv_buf,
+                                     sizeof(recv_buf), 0,
+                                     (struct sockaddr *)&client_addr,
+                                     &addr_len);
                 if (n <= 0)
                     continue;
 
-                /* Silently drop oversized packets */
                 if ((size_t)n > Q3_MAX_PACKET_SIZE)
                     continue;
 
-                /* Look up the client's existing session, if any */
-                session_t *sess = session_find_by_addr(&sessions, &client_addr);
+                session_t *sess = session_find_by_addr(&srv->sessions,
+                                                       &client_addr);
                 if (!sess) {
-                    /*
-                     * New client — classify as browser query or game session
-                     * and enforce separate limits for each type.
-                     */
                     int is_query = q3_is_query(recv_buf, (size_t)n);
 
                     if (is_query) {
-                        /* Query sessions have their own capacity pool */
-                        if (query_count >= cfg->max_query_sessions) {
-                            log_warn("Max query sessions reached, dropping query");
+                        if (srv->query_count >= cfg->max_query_sessions) {
+                            log_warn("Server #%d: max query sessions reached",
+                                     srv_idx + 1);
                             continue;
                         }
                     } else {
-                        /* Game sessions use the original rate limiter and cap */
-                        if (!rate_limit_check(&rate_limiter)) {
-                            log_warn("Rate limit: dropping new client");
+                        if (!rate_limit_check(&srv->rate_limiter)) {
+                            char drop_str[INET_ADDRSTRLEN];
+                            inet_ntop(AF_INET, &client_addr.sin_addr,
+                                      drop_str, sizeof(drop_str));
+                            log_warn("Server #%d: rate limit (%d/sec) "
+                                     "exceeded — dropping new connection "
+                                     "from %s:%u",
+                                     srv_idx + 1, cfg->max_new_per_sec,
+                                     drop_str,
+                                     ntohs(client_addr.sin_port));
                             continue;
                         }
-                        int game_count = sessions.count - query_count;
+                        int game_count = srv->sessions.count -
+                                         srv->query_count;
                         if (game_count >= cfg->max_clients) {
-                            log_warn("Max clients reached, dropping new connection");
+                            char drop_str[INET_ADDRSTRLEN];
+                            inet_ntop(AF_INET, &client_addr.sin_addr,
+                                      drop_str, sizeof(drop_str));
+                            log_warn("Server #%d: max clients (%d) "
+                                     "reached — dropping new connection "
+                                     "from %s:%u",
+                                     srv_idx + 1, cfg->max_clients,
+                                     drop_str,
+                                     ntohs(client_addr.sin_port));
                             continue;
                         }
                     }
 
-                    /* Create a dedicated relay socket for this client */
                     int relay_fd = create_relay_socket();
                     if (relay_fd < 0) {
                         log_error("Failed to create relay socket: %s",
@@ -510,65 +601,69 @@ int relay_run(const relay_config_t *cfg)
                         continue;
                     }
 
-                    /*
-                     * connect() the relay socket to the real server so we
-                     * can use send()/recv() instead of sendto()/recvfrom(),
-                     * and the kernel will filter responses for us.
-                     */
-                    if (connect(relay_fd, (struct sockaddr *)&cfg->remote_addr,
+                    if (connect(relay_fd,
+                                (struct sockaddr *)&cfg->remote_addr,
                                 sizeof(cfg->remote_addr)) < 0) {
-                        log_error("connect() relay socket: %s", strerror(errno));
+                        log_error("connect() relay socket: %s",
+                                  strerror(errno));
                         close(relay_fd);
                         continue;
                     }
 
-                    /* Register the session in the hash map */
-                    sess = session_insert(&sessions, &client_addr, relay_fd);
+                    sess = session_insert(&srv->sessions, &client_addr,
+                                          relay_fd);
                     if (!sess) {
                         close(relay_fd);
                         continue;
                     }
                     sess->is_query = is_query;
                     if (is_query)
-                        query_count++;
+                        srv->query_count++;
 
-                    /* Add the relay socket to epoll so we get server responses */
+                    /* Register relay fd with same server index */
                     struct epoll_event rev = {0};
-                    rev.events  = EPOLLIN;
-                    rev.data.fd = relay_fd;
+                    rev.events   = EPOLLIN;
+                    rev.data.u64 = pack_epoll_data(srv_idx, relay_fd);
                     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, relay_fd, &rev);
 
                     char addr_str[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &client_addr.sin_addr,
                               addr_str, sizeof(addr_str));
-                    log_info("New %s session: %s:%u (relay fd=%d, total=%d, queries=%d)",
+                    log_info("Server #%d: new %s session: %s:%u "
+                             "(relay fd=%d, total=%d, queries=%d)",
+                             srv_idx + 1,
                              is_query ? "query" : "game",
                              addr_str, ntohs(client_addr.sin_port),
-                             relay_fd, sessions.count, query_count);
+                             relay_fd, srv->sessions.count,
+                             srv->query_count);
                 }
 
                 /*
-                 * Session promotion: if this is an existing query session
-                 * but the new packet is NOT a query (e.g. getchallenge),
-                 * promote it to a game session so it gets the longer timeout.
+                 * Session promotion: query → game.
+                 *
+                 * When a client that initially sent a browser query
+                 * (getinfo/getstatus) follows up with a non-query
+                 * packet (e.g. getchallenge, connect), they are
+                 * transitioning from browsing to actually joining.
+                 * Re-classify the session so it counts against the
+                 * game client cap instead of the query session cap.
                  */
-                if (sess->is_query && !q3_is_query(recv_buf, (size_t)n)) {
+                if (sess->is_query &&
+                    !q3_is_query(recv_buf, (size_t)n)) {
                     sess->is_query = 0;
-                    if (query_count > 0)
-                        query_count--;
+                    if (srv->query_count > 0)
+                        srv->query_count--;
                     char addr_str[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &sess->client_addr.sin_addr,
                               addr_str, sizeof(addr_str));
-                    log_info("Session promoted query->game: %s:%u",
-                             addr_str, ntohs(sess->client_addr.sin_port));
+                    log_info("Server #%d: promoted query->game: %s:%u",
+                             srv_idx + 1, addr_str,
+                             ntohs(sess->client_addr.sin_port));
                 }
 
-                /* Update activity timestamp and traffic counters */
                 sess->last_activity = now;
                 sess->pkts_to_server++;
                 sess->bytes_to_server += (uint64_t)n;
-
-                /* Forward the packet to the real server via the relay socket */
                 send(sess->relay_fd, recv_buf, (size_t)n, 0);
 
             } else {
@@ -579,25 +674,25 @@ int relay_run(const relay_config_t *cfg)
                 if (n <= 0)
                     continue;
 
-                /* Find which client this relay socket belongs to */
-                session_t *sess = session_find_by_fd(&sessions, fd);
+                session_t *sess = session_find_by_fd(&srv->sessions, fd);
                 if (!sess)
                     continue;
 
-                /* Update activity timestamp and traffic counters */
                 sess->last_activity = now;
                 sess->pkts_to_client++;
                 sess->bytes_to_client += (uint64_t)n;
 
-                /*
-                 * Optional hostname rewrite: if a hostname tag is configured
-                 * and this is a connectionless server browser response
-                 * (statusResponse or infoResponse), prepend the tag to
-                 * sv_hostname so players see e.g. "[PROXY] ServerName".
-                 */
                 const uint8_t *send_data = recv_buf;
                 size_t send_len = (size_t)n;
 
+                /*
+                 * Hostname rewriting: if a tag is configured and this
+                 * is a connectionless response (statusResponse or
+                 * infoResponse), try to prepend the tag to the
+                 * sv_hostname value.  If the rewrite can't be applied
+                 * (wrong packet type, key not found, or buffer too
+                 * small), the original packet is forwarded unchanged.
+                 */
                 if (cfg->hostname_tag &&
                     q3_is_connectionless(recv_buf, (size_t)n)) {
                     size_t new_len = q3_rewrite_hostname(
@@ -607,53 +702,75 @@ int relay_run(const relay_config_t *cfg)
                     if (new_len > 0) {
                         send_data = rewrite_buf;
                         send_len  = new_len;
+                        log_debug("Server #%d: rewrote hostname with "
+                                  "tag \"%s\"", srv_idx + 1,
+                                  cfg->hostname_tag);
                     }
                 }
 
-                /* Relay the (possibly rewritten) response back to the client */
-                sendto(listen_fd, send_data, send_len, 0,
+                sendto(srv->listen_fd, send_data, send_len, 0,
                        (struct sockaddr *)&sess->client_addr,
                        sizeof(sess->client_addr));
             }
         }
 
         /* ---------------------------------------------------------- */
-        /*  Periodic timeout sweep                                    */
+        /*  Periodic timeout sweep and heartbeats — all servers       */
         /* ---------------------------------------------------------- */
-        if (now - last_sweep >= SWEEP_INTERVAL) {
-            do_timeout_sweep(&sessions, epoll_fd,
-                             cfg->session_timeout, cfg->query_timeout,
-                             &query_count);
-            last_sweep = now;
-        }
+        for (int s = 0; s < server_count; s++) {
+            server_instance_t *srv = &servers[s];
 
-        /* ---------------------------------------------------------- */
-        /*  Periodic heartbeat to master server(s)                    */
-        /* ---------------------------------------------------------- */
-        if (cfg->master_count > 0 &&
-            now - last_heartbeat >= Q3_HEARTBEAT_INTERVAL) {
-            send_heartbeats(listen_fd, cfg);
-            last_heartbeat = now;
+            if (now - srv->last_sweep >= SWEEP_INTERVAL) {
+                do_timeout_sweep(&srv->sessions, epoll_fd,
+                                 srv->cfg->session_timeout,
+                                 srv->cfg->query_timeout,
+                                 &srv->query_count);
+                srv->last_sweep = now;
+            }
+
+            if (srv->cfg->master_count > 0 &&
+                now - srv->last_heartbeat >= Q3_HEARTBEAT_INTERVAL) {
+                send_heartbeats(srv->listen_fd, srv->cfg);
+                srv->last_heartbeat = now;
+            }
         }
     }
 
     /* ============================================================== */
     /*  Clean shutdown                                                */
+    /*                                                                */
+    /*  Reached either when g_running is cleared by the signal        */
+    /*  handler (graceful) or on a fatal initialisation failure       */
+    /*  (goto cleanup).  We tear down every server that was           */
+    /*  successfully initialised: close all relay sockets, free the   */
+    /*  session map, and close the listen socket.                     */
     /* ============================================================== */
-    log_info("Shutting down...");
+cleanup:
+    log_info("Shutting down — closing %d server(s)...", init_count);
 
-    /* Close every active relay socket */
-    for (int i = 0; i < sessions.capacity; i++) {
-        if (sessions.sessions[i].active) {
-            close(sessions.sessions[i].relay_fd);
+    for (int s = 0; s < init_count; s++) {
+        server_instance_t *srv = &servers[s];
+        int closed = 0;
+
+        /* Close every active relay socket */
+        for (int j = 0; j < srv->sessions.capacity; j++) {
+            if (srv->sessions.sessions[j].active) {
+                close(srv->sessions.sessions[j].relay_fd);
+                closed++;
+            }
         }
+
+        log_info("Server #%d: closed %d relay socket(s)", s + 1, closed);
+
+        session_map_destroy(&srv->sessions);
+
+        if (srv->listen_fd >= 0)
+            close(srv->listen_fd);
     }
 
-    /* Free the session map, then close infrastructure fds */
-    session_map_destroy(&sessions);
-    close(listen_fd);
+    free(servers);
     close(epoll_fd);
 
     log_info("Clean shutdown complete");
-    return 0;
+    return g_running ? -1 : 0;
 }

@@ -1,0 +1,58 @@
+# urt-proxy example configuration
+#
+# Copy this file to /etc/urt-proxy.conf (or wherever you prefer) and
+# adjust the values.  Start the proxy with:
+#
+#   ./build/urt-proxy -c /etc/urt-proxy.conf
+#
+# Lines starting with # or ; are comments.
+# Each [server:<name>] section defines one proxied game server.
+# All keys except remote-host are optional and have sensible defaults.
+
+[global]
+# Enable verbose debug logging (default: false)
+debug = false
+
+[server:dallas]
+# Local UDP port that clients connect to
+listen-port = 27960
+
+# Real game server address (WireGuard IP) — REQUIRED
+remote-host = 10.0.0.2
+
+# Real game server port (default: 27960)
+remote-port = 27960
+
+# Maximum concurrent game sessions (default: 20)
+max-clients = 20
+
+# Game session inactivity timeout in seconds (default: 30)
+timeout = 30
+
+# Prefix prepended to sv_hostname in server browser (optional)
+hostname-tag = [DALLAS]
+
+# Max new game sessions per second (default: 5)
+rate-limit = 5
+
+# Max concurrent server browser query sessions (default: 100)
+max-query-sessions = 100
+
+# Query session inactivity timeout in seconds (default: 5)
+query-timeout = 5
+
+# Master server(s) for server list registration (optional, up to 4)
+# Supports HOST or HOST:PORT — port defaults to 27900
+master-server = master.urbanterror.info
+
+[server:chicago]
+listen-port = 27961
+remote-host = 10.0.0.3
+remote-port = 27960
+max-clients = 20
+timeout = 30
+hostname-tag = [CHICAGO]
+rate-limit = 5
+max-query-sessions = 100
+query-timeout = 5
+master-server = master.urbanterror.info

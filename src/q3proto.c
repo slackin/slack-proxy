@@ -10,6 +10,14 @@
  * to a "getinfo" or "getstatus" query from the master server or a
  * player's server browser, the proxy can prepend a tag (e.g. "[PROXY]")
  * to the sv_hostname value so users can identify the proxy in the list.
+ *
+ * Note on key names:
+ *   - statusResponse uses raw cvar names, so the key is "sv_hostname".
+ *   - infoResponse uses a curated key list where the engine maps the
+ *     cvar to the shorter name "hostname".
+ *   We search for "\\sv_hostname\\" first (longer, more specific) to
+ *   avoid accidentally matching a substring, then fall back to
+ *   "\\hostname\\".
  */
 
 #include "q3proto.h"
@@ -149,7 +157,19 @@ size_t q3_rewrite_hostname(const uint8_t *data, size_t len,
     size_t new_len = val_offset + new_val_len + (len - val_offset - old_val_len);
 
     if (new_len > out_cap)
-        return 0;   /* Output buffer too small */
+        return 0;   /* Output buffer too small — caller falls back to
+                      * forwarding the original unmodified packet. */
+
+    /*
+     * Three-step packet reconstruction:
+     *   1. Copy everything before the hostname value (OOB header + keys
+     *      up to and including the hostname key delimiter).
+     *   2. Write the new value: "<prefix> <original_value>".
+     *   3. Copy the remainder (subsequent keys and/or player data).
+     *
+     * This avoids modifying the packet in-place, which would be unsafe
+     * because the new value is longer than the original.
+     */
 
     /* Step 1: copy everything up to (but not including) the old value */
     memcpy(out, data, val_offset);

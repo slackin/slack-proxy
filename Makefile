@@ -20,7 +20,8 @@ SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/relay.c \
        $(SRC_DIR)/hashmap.c \
        $(SRC_DIR)/q3proto.c \
-       $(SRC_DIR)/log.c
+       $(SRC_DIR)/log.c \
+       $(SRC_DIR)/config.c
 
 OBJS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 BIN  = $(BUILD_DIR)/urt-proxy

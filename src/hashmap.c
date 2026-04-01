@@ -244,10 +244,16 @@ session_t *session_insert(session_map_t *map,
  *
  * Called after every removal to eliminate "holes" in linear probing
  * chains.  Without this, a deleted slot could cause lookups for other
- * sessions in the same chain to incorrectly return NULL.
+ * sessions in the same chain to incorrectly return NULL (the
+ * "tombstone" problem with open addressing).
  *
- * This is a simple O(n) operation where n = capacity (max 1000), so
- * the cost is negligible compared to network I/O.
+ * Cost: O(capacity) time to scan the session array plus O(n) inserts
+ * into each table, where n = number of active sessions.  Since
+ * max_clients is capped at 1000, the absolute cost is negligible
+ * compared to the network I/O that triggers it.  This approach was
+ * chosen over tombstone-based deletion because it is simpler to
+ * reason about and eliminates the risk of tombstone accumulation
+ * degrading lookup performance over time.
  */
 static void rebuild_tables(session_map_t *map)
 {
@@ -271,6 +277,12 @@ static void rebuild_tables(session_map_t *map)
  *
  * Marks the session slot as free, invalidates its fd, decrements the
  * count, and rebuilds both hash tables to maintain probing correctness.
+ *
+ * Unlike insertion (which is O(1) amortised), removal is O(capacity)
+ * due to the full rebuild.  This is acceptable because removals are
+ * infrequent (driven by timeout sweeps, not per-packet) and capacity
+ * is small.
+ *
  * Does NOT close the relay fd — the caller is responsible for that.
  */
 void session_remove(session_map_t *map, session_t *s)
