@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 /// Information about a single proxy server instance, returned by the "status" command.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ServerInfo {
+    #[serde(default)]
+    pub index: usize,
     pub listen_port: u16,
     pub remote_addr: String,
     #[serde(default)]

@@ -419,15 +419,28 @@ int relay_run(const relay_config_t *cfgs, int server_count,
     }
 
     /* --- Create per-server instances --- */
-    server_instance_t *servers = NULL;
-    if (server_count > 0) {
-        servers = calloc((size_t)server_count, sizeof(server_instance_t));
-        if (!servers) {
-            log_error("Failed to allocate server instances");
-            close(epoll_fd);
-            return -1;
-        }
+    server_instance_t *servers = calloc(RELAY_MAX_SERVERS,
+                                        sizeof(server_instance_t));
+    if (!servers) {
+        log_error("Failed to allocate server instances");
+        close(epoll_fd);
+        return -1;
     }
+
+    /* Mutable config array for dynamically added servers.
+     * Startup configs are copied here so cfg pointers stay valid. */
+    relay_config_t *dyn_cfgs = calloc(RELAY_MAX_SERVERS,
+                                      sizeof(relay_config_t));
+    if (!dyn_cfgs) {
+        log_error("Failed to allocate config array");
+        free(servers);
+        close(epoll_fd);
+        return -1;
+    }
+
+    /* Copy initial configs into the dynamic array */
+    for (int s = 0; s < server_count && s < RELAY_MAX_SERVERS; s++)
+        dyn_cfgs[s] = cfgs[s];
 
     int init_count = 0; /* How many servers we've successfully initialised */
     mgmt_state_t mgmt_state;
@@ -435,7 +448,7 @@ int relay_run(const relay_config_t *cfgs, int server_count,
 
     for (int s = 0; s < server_count; s++) {
         server_instance_t *srv = &servers[s];
-        srv->cfg   = &cfgs[s];
+        srv->cfg   = &dyn_cfgs[s];
         srv->index = s;
 
         /* Create the public-facing listen socket */
@@ -476,13 +489,14 @@ int relay_run(const relay_config_t *cfgs, int server_count,
                  srv->cfg->max_clients, srv->cfg->session_timeout,
                  srv->cfg->max_query_sessions, srv->cfg->query_timeout);
 
+        srv->active = 1;
         init_count++;
     }
 
     /* --- Initialise management API (if configured) --- */
     if (mgmt_cfg && mgmt_cfg->enabled) {
         if (mgmt_init(&mgmt_state, mgmt_cfg, epoll_fd,
-                      servers, init_count) == 0)
+                      servers, init_count, dyn_cfgs) == 0)
             mgmt_active = 1;
         else
             log_warn("Management API failed to start — continuing without it");
@@ -520,10 +534,12 @@ int relay_run(const relay_config_t *cfgs, int server_count,
                 continue;
             }
 
-            if (srv_idx < 0 || srv_idx >= server_count)
+            if (srv_idx < 0 || srv_idx >= RELAY_MAX_SERVERS)
                 continue;
 
             server_instance_t *srv = &servers[srv_idx];
+            if (!srv->active)
+                continue;
             const relay_config_t *cfg = srv->cfg;
 
             if (fd == srv->listen_fd) {
@@ -705,8 +721,10 @@ int relay_run(const relay_config_t *cfgs, int server_count,
         /* ---------------------------------------------------------- */
         /*  Periodic timeout sweep and heartbeats — all servers       */
         /* ---------------------------------------------------------- */
-        for (int s = 0; s < server_count; s++) {
+        for (int s = 0; s < RELAY_MAX_SERVERS; s++) {
             server_instance_t *srv = &servers[s];
+            if (!srv->active)
+                continue;
 
             if (now - srv->last_sweep >= SWEEP_INTERVAL) {
                 do_timeout_sweep(&srv->sessions, epoll_fd,
@@ -737,10 +755,13 @@ cleanup:
     if (mgmt_active)
         mgmt_cleanup(&mgmt_state);
 
-    log_info("Shutting down — closing %d server(s)...", init_count);
+    log_info("Shutting down — closing server(s)...");
 
-    for (int s = 0; s < init_count; s++) {
+    for (int s = 0; s < RELAY_MAX_SERVERS; s++) {
         server_instance_t *srv = &servers[s];
+        if (!srv->active)
+            continue;
+
         int closed = 0;
 
         /* Close every active relay socket */
@@ -760,8 +781,120 @@ cleanup:
     }
 
     free(servers);
+    free(dyn_cfgs);
     close(epoll_fd);
 
     log_info("Clean shutdown complete");
     return g_running ? -1 : 0;
+}
+
+/* ================================================================== */
+/*  Dynamic server add / remove                                       */
+/* ================================================================== */
+
+int relay_add_server(server_instance_t *servers, int *server_count,
+                     relay_config_t *dyn_cfgs, const relay_config_t *cfg,
+                     int epoll_fd)
+{
+    /* Find a free slot */
+    int slot = -1;
+    for (int i = 0; i < RELAY_MAX_SERVERS; i++) {
+        if (!servers[i].active) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        log_error("Cannot add server — all %d slots in use", RELAY_MAX_SERVERS);
+        return -1;
+    }
+
+    /* Check for duplicate listen port */
+    for (int i = 0; i < RELAY_MAX_SERVERS; i++) {
+        if (servers[i].active && servers[i].cfg->listen_port == cfg->listen_port) {
+            log_error("Cannot add server — port %u already in use by server #%d",
+                      cfg->listen_port, i + 1);
+            return -1;
+        }
+    }
+
+    /* Copy config into the persistent array */
+    dyn_cfgs[slot] = *cfg;
+
+    /* Initialise the server instance */
+    server_instance_t *srv = &servers[slot];
+    memset(srv, 0, sizeof(*srv));
+    srv->cfg   = &dyn_cfgs[slot];
+    srv->index = slot;
+
+    srv->listen_fd = create_listen_socket(srv->cfg->listen_port);
+    if (srv->listen_fd < 0)
+        return -1;
+
+    int total_cap = srv->cfg->max_clients + srv->cfg->max_query_sessions;
+    if (session_map_init(&srv->sessions, total_cap) < 0) {
+        log_error("Server #%d: failed to initialize session map", slot + 1);
+        close(srv->listen_fd);
+        return -1;
+    }
+
+    srv->rate_limiter.max_per_sec = srv->cfg->max_new_per_sec;
+    srv->last_sweep     = time(NULL);
+    srv->last_heartbeat = 0;
+
+    struct epoll_event ev = {0};
+    ev.events   = EPOLLIN;
+    ev.data.u64 = pack_epoll_data(slot, srv->listen_fd);
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, srv->listen_fd, &ev);
+
+    srv->active = 1;
+    (*server_count)++;
+
+    char remote_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &srv->cfg->remote_addr.sin_addr,
+              remote_str, sizeof(remote_str));
+    log_info("Server #%d added: :%u -> %s:%u", slot + 1,
+             srv->cfg->listen_port, remote_str,
+             ntohs(srv->cfg->remote_addr.sin_port));
+
+    return slot;
+}
+
+int relay_remove_server(server_instance_t *servers, int *server_count,
+                        int server_idx, int epoll_fd)
+{
+    if (server_idx < 0 || server_idx >= RELAY_MAX_SERVERS ||
+        !servers[server_idx].active) {
+        log_error("Cannot remove server #%d — invalid or inactive",
+                  server_idx + 1);
+        return -1;
+    }
+
+    server_instance_t *srv = &servers[server_idx];
+
+    /* Close all relay sockets (kick all sessions) */
+    int closed = 0;
+    for (int j = 0; j < srv->sessions.capacity; j++) {
+        if (srv->sessions.sessions[j].active) {
+            epoll_ctl(epoll_fd, EPOLL_CTL_DEL,
+                      srv->sessions.sessions[j].relay_fd, NULL);
+            close(srv->sessions.sessions[j].relay_fd);
+            closed++;
+        }
+    }
+
+    session_map_destroy(&srv->sessions);
+
+    /* Remove listen socket from epoll and close it */
+    if (srv->listen_fd >= 0) {
+        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, srv->listen_fd, NULL);
+        close(srv->listen_fd);
+    }
+
+    log_info("Server #%d removed (closed %d sessions)", server_idx + 1, closed);
+
+    srv->active = 0;
+    (*server_count)--;
+
+    return 0;
 }

@@ -185,14 +185,19 @@ static void handle_status(mgmt_state_t *state, int client_fd)
     pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
                     "{\"server_count\":%d,\"servers\":[", state->server_count);
 
-    for (int i = 0; i < state->server_count; i++) {
+    int first = 1;
+    for (int i = 0; i < RELAY_MAX_SERVERS; i++) {
         server_instance_t *srv = &state->servers[i];
+        if (!srv->active)
+            continue;
+
         char remote_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &srv->cfg->remote_addr.sin_addr,
                   remote_str, sizeof(remote_str));
 
-        if (i > 0)
+        if (!first)
             pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, ",");
+        first = 0;
 
         pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
             "{\"index\":%d,"
@@ -274,7 +279,8 @@ static void handle_sessions(mgmt_state_t *state, int client_fd,
 {
     int server_idx = -1;
     if (!json_find_int(json, "server", &server_idx) ||
-        server_idx < 0 || server_idx >= state->server_count) {
+        server_idx < 0 || server_idx >= RELAY_MAX_SERVERS ||
+        !state->servers[server_idx].active) {
         send_error(client_fd, "invalid or missing 'server' index");
         return;
     }
@@ -301,7 +307,8 @@ static void handle_set(mgmt_state_t *state, int client_fd, const char *json)
 {
     int server_idx = -1;
     if (!json_find_int(json, "server", &server_idx) ||
-        server_idx < 0 || server_idx >= state->server_count) {
+        server_idx < 0 || server_idx >= RELAY_MAX_SERVERS ||
+        !state->servers[server_idx].active) {
         send_error(client_fd, "invalid or missing 'server' index");
         return;
     }
@@ -399,7 +406,8 @@ static void handle_kick(mgmt_state_t *state, int client_fd, const char *json)
 {
     int server_idx = -1;
     if (!json_find_int(json, "server", &server_idx) ||
-        server_idx < 0 || server_idx >= state->server_count) {
+        server_idx < 0 || server_idx >= RELAY_MAX_SERVERS ||
+        !state->servers[server_idx].active) {
         send_error(client_fd, "invalid or missing 'server' index");
         return;
     }
@@ -470,7 +478,8 @@ static void handle_kick_all(mgmt_state_t *state, int client_fd,
 {
     int server_idx = -1;
     if (!json_find_int(json, "server", &server_idx) ||
-        server_idx < 0 || server_idx >= state->server_count) {
+        server_idx < 0 || server_idx >= RELAY_MAX_SERVERS ||
+        !state->servers[server_idx].active) {
         send_error(client_fd, "invalid or missing 'server' index");
         return;
     }
@@ -510,6 +519,109 @@ static void handle_kick_all(mgmt_state_t *state, int client_fd,
     send_ok(client_fd, data);
 }
 
+/*
+ * handle_add_server — Add a new server at runtime.
+ *
+ * Required JSON fields: listen_port, remote_host, remote_port.
+ * Optional: max_clients, session_timeout, query_timeout,
+ *           max_new_per_sec, max_query_sessions, hostname_tag.
+ */
+static void handle_add_server(mgmt_state_t *state, int client_fd,
+                              const char *json)
+{
+    relay_config_t cfg = {0};
+
+    /* Required: listen_port */
+    int port = 0;
+    if (!json_find_int(json, "listen_port", &port) || port < 1 || port > 65535) {
+        send_error(client_fd, "'listen_port' required (1-65535)");
+        return;
+    }
+    cfg.listen_port = (uint16_t)port;
+
+    /* Required: remote_host */
+    char remote_host[256] = {0};
+    if (!json_find_string(json, "remote_host", remote_host, sizeof(remote_host)) ||
+        remote_host[0] == '\0') {
+        send_error(client_fd, "'remote_host' required (IPv4 address)");
+        return;
+    }
+
+    cfg.remote_addr.sin_family = AF_INET;
+    if (inet_pton(AF_INET, remote_host, &cfg.remote_addr.sin_addr) != 1) {
+        send_error(client_fd, "invalid 'remote_host' — must be IPv4 address");
+        return;
+    }
+
+    /* Required: remote_port */
+    int rport = 0;
+    if (!json_find_int(json, "remote_port", &rport) || rport < 1 || rport > 65535) {
+        send_error(client_fd, "'remote_port' required (1-65535)");
+        return;
+    }
+    cfg.remote_addr.sin_port = htons((uint16_t)rport);
+
+    /* Optional fields with defaults */
+    int val;
+    cfg.max_clients = 20;
+    if (json_find_int(json, "max_clients", &val) && val >= 1 && val <= 1000)
+        cfg.max_clients = val;
+
+    cfg.session_timeout = 30;
+    if (json_find_int(json, "session_timeout", &val) && val >= 5)
+        cfg.session_timeout = val;
+
+    cfg.query_timeout = 5;
+    if (json_find_int(json, "query_timeout", &val) && val >= 1)
+        cfg.query_timeout = val;
+
+    cfg.max_new_per_sec = 5;
+    if (json_find_int(json, "max_new_per_sec", &val) && val >= 1)
+        cfg.max_new_per_sec = val;
+
+    cfg.max_query_sessions = 100;
+    if (json_find_int(json, "max_query_sessions", &val) && val >= 1 && val <= 1000)
+        cfg.max_query_sessions = val;
+
+    char tag[256] = {0};
+    if (json_find_string(json, "hostname_tag", tag, sizeof(tag)) && tag[0] != '\0')
+        cfg.hostname_tag = strdup(tag);
+
+    int idx = relay_add_server(state->servers, &state->server_count,
+                               state->dyn_cfgs, &cfg, state->epoll_fd);
+    if (idx < 0) {
+        send_error(client_fd, "failed to add server (check logs)");
+        return;
+    }
+
+    char data[64];
+    snprintf(data, sizeof(data), "{\"index\":%d}", idx);
+    send_ok(client_fd, data);
+}
+
+/*
+ * handle_remove_server — Remove a server at runtime.
+ */
+static void handle_remove_server(mgmt_state_t *state, int client_fd,
+                                 const char *json)
+{
+    int server_idx = -1;
+    if (!json_find_int(json, "server", &server_idx) ||
+        server_idx < 0 || server_idx >= RELAY_MAX_SERVERS ||
+        !state->servers[server_idx].active) {
+        send_error(client_fd, "invalid or missing 'server' index");
+        return;
+    }
+
+    if (relay_remove_server(state->servers, &state->server_count,
+                            server_idx, state->epoll_fd) < 0) {
+        send_error(client_fd, "failed to remove server (check logs)");
+        return;
+    }
+
+    send_ok(client_fd, NULL);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Command dispatch                                                  */
 /* ------------------------------------------------------------------ */
@@ -535,6 +647,10 @@ static void dispatch_command(mgmt_state_t *state, int client_fd,
         handle_kick(state, client_fd, json);
     else if (strcmp(cmd, "kick_all") == 0)
         handle_kick_all(state, client_fd, json);
+    else if (strcmp(cmd, "add_server") == 0)
+        handle_add_server(state, client_fd, json);
+    else if (strcmp(cmd, "remove_server") == 0)
+        handle_remove_server(state, client_fd, json);
     else
         send_error(client_fd, "unknown command");
 }
@@ -602,7 +718,8 @@ static inline uint64_t pack_epoll_data(int server_index, int fd)
 }
 
 int mgmt_init(mgmt_state_t *state, const mgmt_config_t *config,
-              int epoll_fd, server_instance_t *servers, int server_count)
+              int epoll_fd, server_instance_t *servers, int server_count,
+              relay_config_t *dyn_cfgs)
 {
     memset(state, 0, sizeof(*state));
     state->listen_fd    = -1;
@@ -610,6 +727,7 @@ int mgmt_init(mgmt_state_t *state, const mgmt_config_t *config,
     state->config       = config;
     state->servers      = servers;
     state->server_count = server_count;
+    state->dyn_cfgs     = dyn_cfgs;
 
     for (int i = 0; i < MGMT_MAX_CLIENTS; i++)
         state->client_fds[i] = -1;

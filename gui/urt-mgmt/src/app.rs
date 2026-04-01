@@ -33,6 +33,18 @@ pub struct App {
     // Kick All confirmation modal
     pub confirm_kick_all: Option<usize>,
 
+    // Remove Server confirmation modal
+    pub confirm_remove: Option<usize>,
+
+    // Add Server form state
+    pub show_add_server: bool,
+    pub add_listen_port: String,
+    pub add_remote_host: String,
+    pub add_remote_port: String,
+    pub add_max_clients: String,
+    pub add_timeout: String,
+    pub add_hostname_tag: String,
+
     // Log
     pub log_entries: VecDeque<(String, String)>,
 
@@ -61,6 +73,14 @@ impl App {
             tune_values: Vec::new(),
             selected_sessions: Vec::new(),
             confirm_kick_all: None,
+            confirm_remove: None,
+            show_add_server: false,
+            add_listen_port: "27960".to_string(),
+            add_remote_host: String::new(),
+            add_remote_port: "27960".to_string(),
+            add_max_clients: "20".to_string(),
+            add_timeout: "30".to_string(),
+            add_hostname_tag: String::new(),
             log_entries: VecDeque::new(),
             cmd_tx,
             resp_rx,
@@ -140,6 +160,39 @@ impl App {
             payload,
         });
         self.log(&format!("Kick all on server #{}", server + 1));
+    }
+
+    pub fn send_add_server(&mut self, listen_port: u16, remote_host: &str,
+                           remote_port: u16, max_clients: i64,
+                           session_timeout: i64, hostname_tag: &str) {
+        let mut payload = serde_json::json!({
+            "cmd": "add_server",
+            "listen_port": listen_port,
+            "remote_host": remote_host,
+            "remote_port": remote_port,
+            "max_clients": max_clients,
+            "session_timeout": session_timeout,
+        });
+        if !hostname_tag.is_empty() {
+            payload["hostname_tag"] = serde_json::json!(hostname_tag);
+        }
+        let _ = self.cmd_tx.send(Command::Send {
+            cmd_name: "add_server".to_string(),
+            payload,
+        });
+        self.log(&format!("Adding server :{} -> {}:{}", listen_port, remote_host, remote_port));
+    }
+
+    pub fn send_remove_server(&mut self, server: usize) {
+        let payload = serde_json::json!({
+            "cmd": "remove_server",
+            "server": server,
+        });
+        let _ = self.cmd_tx.send(Command::Send {
+            cmd_name: "remove_server".to_string(),
+            payload,
+        });
+        self.log(&format!("Removing server #{}", server + 1));
     }
 
     // --- Internal helpers ---
@@ -252,7 +305,8 @@ impl App {
 
                 // Auto-request sessions for active tab
                 if self.active_tab < self.server_data.len() {
-                    self.request_sessions(self.active_tab);
+                    let srv_idx = self.server_data[self.active_tab].index;
+                    self.request_sessions(srv_idx);
                 }
             }
             "sessions" => {
@@ -262,7 +316,7 @@ impl App {
                     }
                 }
             }
-            "set" | "kick" | "kick_all" => {
+            "set" | "kick" | "kick_all" | "add_server" | "remove_server" => {
                 self.log(&format!("{}: OK", cmd_name));
                 self.request_status();
             }

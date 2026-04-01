@@ -21,6 +21,9 @@ typedef struct mgmt_config mgmt_config_t;
 /* Maximum number of master servers the proxy can register with. */
 #define RELAY_MAX_MASTERS 4
 
+/* Maximum number of game servers (matches CONFIG_MAX_SERVERS). */
+#define RELAY_MAX_SERVERS 32
+
 /*
  * relay_config_t — Runtime configuration for one proxied server.
  *
@@ -89,7 +92,10 @@ struct server_instance {
     time_t                last_sweep;
     time_t                last_heartbeat; /* 0 → fire immediately on start   */
     int                   index;      /* Server index (for epoll routing)    */
+    int                   active;     /* 1 = running, 0 = empty/removed slot */
 };
+
+typedef struct server_instance server_instance_t;
 
 /*
  * relay_run — Run the main relay event loop (blocking).
@@ -110,5 +116,37 @@ struct server_instance {
  */
 int relay_run(const relay_config_t *cfgs, int server_count,
               const mgmt_config_t *mgmt_cfg);
+
+/*
+ * relay_add_server — Dynamically add a new server at runtime.
+ *
+ * Finds an empty slot in the pre-allocated server array, creates the
+ * listen socket, session map, and registers with epoll.
+ *
+ * @param servers       Pre-allocated server_instance_t array.
+ * @param server_count  Pointer to current server count (incremented on success).
+ * @param dyn_cfgs      Mutable config array to store the new config.
+ * @param cfg           Fully-populated relay_config_t for the new server.
+ * @param epoll_fd      Epoll instance to register the listen socket with.
+ * @return              Index of the new server on success, -1 on error.
+ */
+int relay_add_server(server_instance_t *servers, int *server_count,
+                     relay_config_t *dyn_cfgs, const relay_config_t *cfg,
+                     int epoll_fd);
+
+/*
+ * relay_remove_server — Dynamically remove a server at runtime.
+ *
+ * Kicks all sessions, closes the listen socket, removes from epoll,
+ * and marks the slot as inactive.
+ *
+ * @param servers       Server instance array.
+ * @param server_count  Pointer to current server count (decremented on success).
+ * @param server_idx    Index of the server to remove.
+ * @param epoll_fd      Epoll instance to deregister from.
+ * @return              0 on success, -1 on error.
+ */
+int relay_remove_server(server_instance_t *servers, int *server_count,
+                        int server_idx, int epoll_fd);
 
 #endif

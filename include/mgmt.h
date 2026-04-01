@@ -14,6 +14,8 @@
  *   set       {"server":N,"key":"...","value":...}  — tune runtime param
  *   kick      {"server":N,"client":"IP:port"}        — close one session
  *   kick_all  {"server":N}      — close all sessions on a server
+ *   add_server {"listen_port":N,"remote_host":"...","remote_port":N,...}
+ *   remove_server {"server":N}  — remove a server (stops + kicks all)
  */
 
 #ifndef URT_MGMT_H
@@ -21,6 +23,8 @@
 
 #include <stdint.h>
 #include <netinet/in.h>
+
+#include "relay.h"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                         */
@@ -46,12 +50,7 @@
 /*  Forward declarations                                              */
 /* ------------------------------------------------------------------ */
 
-/*
- * server_instance_t is defined in relay.c as `struct server_instance`.
- * Forward-declaring it here lets mgmt.c access server state without
- * pulling in all of relay.c's internal types.
- */
-typedef struct server_instance server_instance_t;
+/* server_instance_t and relay_config_t are provided by relay.h */
 
 /* ------------------------------------------------------------------ */
 /*  Configuration                                                     */
@@ -95,7 +94,8 @@ typedef struct {
     /* References into the relay engine */
     const mgmt_config_t *config;                           /* Management configuration   */
     server_instance_t   *servers;                           /* Game-server instance array  */
-    int                  server_count;                      /* Number of game servers      */
+    int                  server_count;                      /* Number of active game servers */
+    relay_config_t      *dyn_cfgs;                          /* Mutable config array (for add) */
 } mgmt_state_t;
 
 /* ------------------------------------------------------------------ */
@@ -108,7 +108,8 @@ typedef struct {
  * @return 0 on success, -1 on error (details logged).
  */
 int mgmt_init(mgmt_state_t *state, const mgmt_config_t *config,
-              int epoll_fd, server_instance_t *servers, int server_count);
+              int epoll_fd, server_instance_t *servers, int server_count,
+              relay_config_t *dyn_cfgs);
 
 /*
  * mgmt_handle_event — Process an epoll event on a management fd.
