@@ -14,7 +14,7 @@ over a WireGuard tunnel to reduce latency by routing through a better network pa
 - **Per-client sessions** — each player gets a dedicated relay socket for proper bidirectional NAT
 - **Query session management** — browser queries and game sessions are tracked separately with independent limits and timeouts
 - **Remote management API** — TCP-based JSON management interface for monitoring and runtime tuning
-- **GUI management client** — cross-platform Python+tkinter GUI for remote proxy configuration
+- **GUI management client** — modern Rust+egui GPU-rendered desktop client for remote proxy management
 - **Single-threaded epoll** — efficient event loop with no threads and no external dependencies
 - **Rate limiting** — caps new session creation to prevent abuse
 - **Master server heartbeat** — periodic registration with UrT master server(s) so the proxy appears in the server browser
@@ -196,8 +196,9 @@ urt-proxy includes a TCP-based management API for remote monitoring and runtime 
 # Start proxy with management API enabled
 ./build/urt-proxy -r 10.0.0.2 --mgmt-key my-secret-key
 
-# Launch the GUI client
-python3 gui/urt-mgmt.py
+# Build and launch the GUI client
+cd gui/urt-mgmt && cargo build --release
+./gui/urt-mgmt/target/release/urt-mgmt
 ```
 
 ### Protocol
@@ -222,15 +223,24 @@ The management API uses **newline-delimited JSON over TCP**. Each message is a s
 
 ### GUI Client
 
-The `gui/urt-mgmt.py` client provides a graphical interface for management. It requires Python 3.6+ with tkinter (included in standard Python installs). No pip packages needed.
+The `gui/urt-mgmt/` directory contains a modern desktop management client built with Rust and egui (GPU-rendered immediate-mode GUI). It compiles to a single standalone binary with no runtime dependencies.
+
+```bash
+cd gui/urt-mgmt
+cargo build --release
+# Binary: target/release/urt-mgmt (or urt-mgmt.exe on Windows)
+```
 
 Features:
+- Dark modern UI with GPU-accelerated rendering
 - Connect to any urt-proxy management endpoint
+- Tabbed interface — one tab per proxied server
 - View server configuration and live session counts
 - Tune runtime parameters with instant apply
-- Browse active sessions with traffic statistics
+- Browse active sessions with traffic statistics in a sortable table
 - Kick individual sessions or all sessions on a server
 - Auto-refreshing display (2-second interval)
+- Scrollable timestamped log panel
 
 ### Security Notes
 
@@ -272,7 +282,7 @@ src/
   q3proto.c    Connectionless packet inspection and hostname rewriting
   log.c        Formatted stderr logging with severity levels
 gui/
-  urt-mgmt.py  Cross-platform Python+tkinter management GUI client
+  urt-mgmt/    Rust+egui GPU-rendered management GUI client (cargo project)
 ```
 
 ## Systemd Service (optional)
