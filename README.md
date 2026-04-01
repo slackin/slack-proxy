@@ -14,6 +14,8 @@ over a WireGuard tunnel to reduce latency by routing through a better network pa
 - **Per-client sessions** — each player gets a dedicated relay socket for proper bidirectional NAT
 - **Query session management** — browser queries and game sessions are tracked separately with independent limits and timeouts
 - **Remote management API** — TCP-based JSON management interface for monitoring and runtime tuning
+- **Management-only mode** — start with no servers configured, add them at runtime via the GUI client
+- **Auto-generated API key** — key is generated on first run, saved to a file, and reused on subsequent startups
 - **GUI management client** — modern Rust+egui GPU-rendered desktop client for remote proxy management
 - **Single-threaded epoll** — efficient event loop with no threads and no external dependencies
 - **Rate limiting** — caps new session creation to prevent abuse
@@ -94,9 +96,26 @@ urt-proxy supports two modes: **single-server CLI mode** and **multi-server conf
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--mgmt-key KEY` | *(none)* | Enable management API with this shared secret |
+| `--mgmt-key KEY` | *(auto)* | Enable management API with this shared secret |
+| `--mgmt-key-file PATH` | `.urt-proxy.key` | Path to API key file (auto-generated on first run) |
 | `--mgmt-port PORT` | 27961 | TCP port for management connections |
 | `--mgmt-addr ADDR` | 127.0.0.1 | Address to bind the management listener (use `0.0.0.0` for remote access) |
+
+If `--mgmt-key` is not provided, the key is automatically loaded from the key file. On first run, a random 32-character hex key is generated, saved to the file with `0600` permissions, and displayed in the terminal.
+
+#### Management-Only Mode
+
+Start the proxy with no `-r` or `-c` — just the management port:
+
+```bash
+# First run: generates .urt-proxy.key and displays it
+./build/urt-proxy
+
+# Or specify a custom key file path:
+./build/urt-proxy --mgmt-key-file /etc/urt-proxy.key
+```
+
+This opens only the management API port so you can add servers at runtime via the GUI client. No game traffic is relayed until servers are configured.
 
 #### Example
 
@@ -188,13 +207,18 @@ Enable debug logging with `-d` for verbose packet-level diagnostics (e.g. hostna
 
 ## Remote Management
 
-urt-proxy includes a TCP-based management API for remote monitoring and runtime tuning. Enable it by providing an API key via `--mgmt-key` (CLI) or `mgmt-key` (config file).
+urt-proxy includes a TCP-based management API for remote monitoring and runtime tuning. The management API is enabled automatically — on first run, a random API key is generated, saved to `.urt-proxy.key`, and displayed in the terminal. On subsequent runs the saved key is reused.
+
+You can also provide a key explicitly via `--mgmt-key` or specify a custom key file path with `--mgmt-key-file`.
 
 ### Quick Start
 
 ```bash
-# Start proxy with management API enabled
-./build/urt-proxy -r 10.0.0.2 --mgmt-key my-secret-key
+# Start proxy — API key auto-generated on first run
+./build/urt-proxy -r 10.0.0.2
+
+# Or start in management-only mode (no game servers)
+./build/urt-proxy
 
 # Build and launch the GUI client
 cd gui/urt-mgmt && cargo build --release
@@ -336,7 +360,7 @@ WantedBy=multi-user.target
 | `max clients (N) reached` | Game session pool is full | Increase `-m` / `max-clients` or decrease `-t` / `timeout` to expire idle sessions faster |
 | `max query sessions (N) reached` | Browser query pool is full | Increase `-Q` / `max-query-sessions` or decrease `-q` / `query-timeout` |
 | Sessions expire too quickly | Timeout too short for your player base | Increase `-t` / `timeout` (default is 30 seconds) |
-| `config file has no [server:] sections` | Config file is missing server blocks | Add at least one `[server:<name>]` section with a `remote-host` key |
+| `config file has no [server:] sections` | Config file is missing server blocks | Add at least one `[server:<name>]` section with a `remote-host` key, or enable the management API to use management-only mode |
 | `'remote-host' is required` | Server section missing the only required key | Add `remote-host = <ip>` to the server section |
 | `servers #X and #Y both use listen-port Z` | Duplicate ports in config file | Give each server a unique `listen-port` |
 | `'x.x.x.x' is not a valid IPv4 address` | Non-IP passed to `-r` in CLI mode | Use a dotted-quad IPv4 address (e.g. `10.0.0.2`); for hostnames, use config file mode |

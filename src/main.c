@@ -21,6 +21,10 @@
 #include <getopt.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 /* Default values for optional CLI arguments */
 #define DEFAULT_LISTEN_PORT   27960
@@ -30,6 +34,163 @@
 #define DEFAULT_RATE_LIMIT    5    /* new sessions per second */
 #define DEFAULT_MAX_QUERY     100  /* max concurrent browser query sessions */
 #define DEFAULT_QUERY_TIMEOUT 5    /* seconds */
+
+/* Default path for auto-generated management API key file */
+#define DEFAULT_KEY_FILE      ".urt-proxy.key"
+
+/* Length of auto-generated API key in hex characters (32 = 16 random bytes) */
+#define GENERATED_KEY_LEN     32
+
+/*
+ * generate_api_key — Create a cryptographically random hex API key.
+ *
+ * Reads from /dev/urandom to produce a hex string of GENERATED_KEY_LEN
+ * characters.  The returned string is malloc'd and must be freed by
+ * the caller.
+ *
+ * @return  Heap-allocated hex key string, or NULL on failure.
+ */
+static char *generate_api_key(void)
+{
+    int num_bytes = GENERATED_KEY_LEN / 2;
+    unsigned char buf[16];
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) {
+        perror("open /dev/urandom");
+        return NULL;
+    }
+    ssize_t n = read(fd, buf, (size_t)num_bytes);
+    close(fd);
+    if (n != num_bytes) {
+        fprintf(stderr, "Error: short read from /dev/urandom\n");
+        return NULL;
+    }
+
+    char *key = malloc(GENERATED_KEY_LEN + 1);
+    if (!key)
+        return NULL;
+
+    for (int i = 0; i < num_bytes; i++)
+        snprintf(key + i * 2, 3, "%02x", buf[i]);
+
+    key[GENERATED_KEY_LEN] = '\0';
+    return key;
+}
+
+/*
+ * load_key_file — Read an API key from a file, trimming whitespace.
+ *
+ * @param path  Path to the key file.
+ * @return  Heap-allocated key string, or NULL if file doesn't exist / can't read.
+ */
+static char *load_key_file(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp)
+        return NULL;
+
+    char line[256];
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return NULL;
+    }
+    fclose(fp);
+
+    /* Trim trailing whitespace / newlines */
+    char *end = line + strlen(line) - 1;
+    while (end >= line && (*end == '\n' || *end == '\r' || *end == ' '))
+        *end-- = '\0';
+
+    if (line[0] == '\0')
+        return NULL;
+
+    return strdup(line);
+}
+
+/*
+ * save_key_file — Write an API key to a file with restrictive permissions.
+ *
+ * Creates the file with mode 0600 (owner read/write only) to prevent
+ * other users from reading the key.
+ *
+ * @param path  Path to the key file.
+ * @param key   The API key string to write.
+ * @return  0 on success, -1 on failure.
+ */
+static int save_key_file(const char *path, const char *key)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "Error: cannot create key file '%s': %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+    size_t len = strlen(key);
+    if (write(fd, key, len) != (ssize_t)len || write(fd, "\n", 1) != 1) {
+        fprintf(stderr, "Error: failed to write key file '%s'\n", path);
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
+/*
+ * ensure_api_key — Load or generate the management API key.
+ *
+ * If --mgmt-key was provided explicitly, use that.  Otherwise, try to
+ * load the key from key_file_path.  If no key file exists, generate a
+ * new random key, save it, and display it to the user.
+ *
+ * @param mgmt_cfg       Management config (may be modified).
+ * @param key_file_path  Path to the persistent key file.
+ * @return  0 on success (key is set), -1 on error.
+ */
+static int ensure_api_key(mgmt_config_t *mgmt_cfg, const char *key_file_path)
+{
+    /* If the user already provided a key via --mgmt-key, we're done. */
+    if (mgmt_cfg->api_key && mgmt_cfg->api_key[0] != '\0')
+        return 0;
+
+    /* Try loading from the key file */
+    char *key = load_key_file(key_file_path);
+    if (key) {
+        mgmt_cfg->api_key = key;
+        mgmt_cfg->enabled = 1;
+        return 0;
+    }
+
+    /* Generate a new key */
+    key = generate_api_key();
+    if (!key) {
+        fprintf(stderr, "Error: failed to generate API key\n");
+        return -1;
+    }
+
+    if (save_key_file(key_file_path, key) < 0) {
+        free(key);
+        return -1;
+    }
+
+    mgmt_cfg->api_key = key;
+    mgmt_cfg->enabled = 1;
+
+    fprintf(stderr,
+        "\n"
+        "╔══════════════════════════════════════════════════════════════╗\n"
+        "║  Management API key generated and saved                     ║\n"
+        "╠══════════════════════════════════════════════════════════════╣\n"
+        "║                                                             ║\n"
+        "║  Key:  %-32s                   ║\n"
+        "║  File: %-48s   ║\n"
+        "║                                                             ║\n"
+        "║  Use this key in the GUI client to connect.                 ║\n"
+        "║  The key is saved and will be reused on next startup.       ║\n"
+        "╚══════════════════════════════════════════════════════════════╝\n"
+        "\n", key, key_file_path);
+
+    return 0;
+}
 
 /*
  * usage — Print a help message listing all command-line options.
@@ -70,19 +231,28 @@ static void usage(const char *prog)
         "\n"
         "Management API:\n"
         "  --mgmt-key KEY            Enable management API with this API key\n"
+        "  --mgmt-key-file PATH      Path to API key file (default: %s)\n"
+        "                            If no --mgmt-key is given, the key is loaded\n"
+        "                            from this file (auto-generated on first run)\n"
         "  --mgmt-port PORT          Management listen port (default: %d)\n"
         "  --mgmt-addr ADDR          Management listen address (default: 127.0.0.1)\n"
         "\n"
+        "Management-only mode:\n"
+        "  Start with just --mgmt-key or --mgmt-key-file and no -r / -c to open\n"
+        "  only the management port.  Servers can then be added via the GUI client.\n"
+        "\n"
         "Examples:\n"
         "  %s -r 10.0.0.2 -l 27960 -p 27960 -T \"[PROXY]\" -M master.urbanterror.info\n"
-        "  %s -c /etc/urt-proxy.conf\n",
+        "  %s -c /etc/urt-proxy.conf\n"
+        "  %s --mgmt-key-file ~/.urt-proxy.key\n",
         prog,
         DEFAULT_LISTEN_PORT, DEFAULT_REMOTE_PORT,
         DEFAULT_MAX_CLIENTS, DEFAULT_TIMEOUT, DEFAULT_RATE_LIMIT,
         DEFAULT_MAX_QUERY, DEFAULT_QUERY_TIMEOUT,
         RELAY_MAX_MASTERS,
+        DEFAULT_KEY_FILE,
         MGMT_DEFAULT_PORT,
-        prog, prog);
+        prog, prog, prog);
 }
 
 int main(int argc, char **argv)
@@ -99,6 +269,7 @@ int main(int argc, char **argv)
     uint16_t remote_port = DEFAULT_REMOTE_PORT;
     const char *remote_host = NULL;
     const char *config_file = NULL;
+    const char *key_file_path = DEFAULT_KEY_FILE;
     int debug = 0;
 
     /* Management API options (CLI, applied in both modes) */
@@ -122,6 +293,7 @@ int main(int argc, char **argv)
         {"mgmt-key",     required_argument, NULL,  1 },
         {"mgmt-port",    required_argument, NULL,  2 },
         {"mgmt-addr",    required_argument, NULL,  3 },
+        {"mgmt-key-file",required_argument, NULL,  4 },
         {NULL, 0, NULL, 0}
     };
 
@@ -253,12 +425,25 @@ int main(int argc, char **argv)
             }
             mgmt_cfg.listen_addr.sin_family = AF_INET;
             break;
+        case 4:     /* --mgmt-key-file: path to API key file */
+            key_file_path = optarg;
+            break;
         case 'h':   /* --help */
         default:
             usage(argv[0]);
             return (opt == 'h') ? 0 : 1;
         }
     }
+
+    /* ================================================================ */
+    /*  Auto-load or generate management API key.                       */
+    /*                                                                  */
+    /*  If no explicit --mgmt-key was given, attempt to load or         */
+    /*  generate one from the key file.  This enables the management    */
+    /*  API automatically when a key file exists or is created.         */
+    /* ================================================================ */
+    if (ensure_api_key(&mgmt_cfg, key_file_path) < 0)
+        return 1;
 
     /* ================================================================ */
     /*  Config-file mode: load from INI, then run.                      */
@@ -306,6 +491,31 @@ int main(int argc, char **argv)
     /* ================================================================ */
     /*  Single-server CLI mode (original behaviour)                     */
     /* ================================================================ */
+
+    /* ================================================================ */
+    /*  Management-only mode (no -r, no -c, but management enabled)     */
+    /*                                                                  */
+    /*  Opens only the management API port so the operator can add      */
+    /*  servers via the GUI client.                                     */
+    /* ================================================================ */
+    if (!remote_host && mgmt_cfg.enabled) {
+        log_init(debug ? LOG_DEBUG : LOG_INFO);
+        log_info("urt-proxy starting (management-only mode)");
+
+        /* Apply mgmt defaults */
+        if (mgmt_cfg.listen_addr.sin_family == 0) {
+            mgmt_cfg.listen_addr.sin_family = AF_INET;
+            mgmt_cfg.listen_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        }
+        if (mgmt_cfg.port == 0) {
+            mgmt_cfg.port = MGMT_DEFAULT_PORT;
+            mgmt_cfg.listen_addr.sin_port = htons(MGMT_DEFAULT_PORT);
+        }
+        if (mgmt_cfg.listen_addr.sin_port == 0)
+            mgmt_cfg.listen_addr.sin_port = htons(mgmt_cfg.port);
+
+        return relay_run(NULL, 0, &mgmt_cfg) == 0 ? 0 : 1;
+    }
 
     /* --remote-host is required in single-server mode */
     if (!remote_host) {

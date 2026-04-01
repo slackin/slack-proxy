@@ -419,12 +419,14 @@ int relay_run(const relay_config_t *cfgs, int server_count,
     }
 
     /* --- Create per-server instances --- */
-    server_instance_t *servers = calloc((size_t)server_count,
-                                        sizeof(server_instance_t));
-    if (!servers) {
-        log_error("Failed to allocate server instances");
-        close(epoll_fd);
-        return -1;
+    server_instance_t *servers = NULL;
+    if (server_count > 0) {
+        servers = calloc((size_t)server_count, sizeof(server_instance_t));
+        if (!servers) {
+            log_error("Failed to allocate server instances");
+            close(epoll_fd);
+            return -1;
+        }
     }
 
     int init_count = 0; /* How many servers we've successfully initialised */

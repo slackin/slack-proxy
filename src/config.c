@@ -442,10 +442,11 @@ int config_load(const char *path, proxy_config_t *out)
     if (rc < 0)
         return -1;
 
-    /* Must have at least one server */
-    if (out->server_count == 0) {
+    /* Allow zero servers if management API is configured (management-only mode) */
+    if (out->server_count == 0 && !out->mgmt.enabled) {
         fprintf(stderr, "Error: config file has no [server:] sections — "
-                "add at least one [server:<name>] block\n");
+                "add at least one [server:<name>] block or enable the "
+                "management API with mgmt-key\n");
         return -1;
     }
 
