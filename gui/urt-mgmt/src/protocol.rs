@@ -23,6 +23,10 @@ pub struct ServerInfo {
     pub active_sessions: i64,
     #[serde(default)]
     pub query_sessions: i64,
+    #[serde(default)]
+    pub master_servers: Vec<String>,
+    #[serde(default)]
+    pub master_broadcast: bool,
 }
 
 /// A single client session, returned by the "sessions" command.

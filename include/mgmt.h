@@ -16,6 +16,7 @@
  *   kick_all  {"server":N}      — close all sessions on a server
  *   add_server {"listen_port":N,"remote_host":"...","remote_port":N,...}
  *   remove_server {"server":N}  — remove a server (stops + kicks all)
+ *   set_master {"server":N,"master_server":"host:port"}  — set/clear master
  */
 
 #ifndef URT_MGMT_H

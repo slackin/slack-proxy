@@ -397,6 +397,7 @@ int main(int argc, char **argv)
                 *(struct sockaddr_in *)res->ai_addr;
             cfg.master_addrs[cfg.master_count].sin_port = htons(mport);
             cfg.master_count++;
+            cfg.heartbeat_enabled = 1;
             freeaddrinfo(res);
             break;
         }

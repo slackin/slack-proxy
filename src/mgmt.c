@@ -16,7 +16,9 @@
 
 #include "mgmt.h"
 #include "relay.h"
+#include "config.h"
 #include "hashmap.h"
+#include "q3proto.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -29,6 +31,7 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 /* ------------------------------------------------------------------ */
 /*  Minimal JSON helpers                                              */
@@ -210,7 +213,8 @@ static void handle_status(mgmt_state_t *state, int client_fd)
             "\"max_query_sessions\":%d,"
             "\"hostname_tag\":\"%s\","
             "\"active_sessions\":%d,"
-            "\"query_sessions\":%d}",
+            "\"query_sessions\":%d,"
+            "\"master_servers\":[",
             i,
             srv->cfg->listen_port,
             remote_str, ntohs(srv->cfg->remote_addr.sin_port),
@@ -222,6 +226,21 @@ static void handle_status(mgmt_state_t *state, int client_fd)
             srv->cfg->hostname_tag ? srv->cfg->hostname_tag : "",
             srv->sessions.count,
             srv->query_count);
+
+        for (int m = 0; m < srv->cfg->master_count; m++) {
+            char master_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &srv->cfg->master_addrs[m].sin_addr,
+                      master_str, sizeof(master_str));
+            if (m > 0)
+                pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, ",");
+            pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+                "\"%s:%u\"",
+                master_str, ntohs(srv->cfg->master_addrs[m].sin_port));
+        }
+
+        pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+            "],\"master_broadcast\":%s}",
+            srv->cfg->heartbeat_enabled ? "true" : "false");
     }
 
     pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "]}");
@@ -390,6 +409,20 @@ static void handle_set(mgmt_state_t *state, int client_fd, const char *json)
             log_info("Management: server #%d hostname_tag cleared",
                      server_idx + 1);
         }
+    }
+    else if (strcmp(key, "master_broadcast") == 0) {
+        int val;
+        if (!json_find_int(json, "value", &val) || (val != 0 && val != 1)) {
+            send_error(client_fd, "value must be 0 or 1");
+            return;
+        }
+        cfg->heartbeat_enabled = val;
+        if (val) {
+            /* Reset heartbeat timer so a heartbeat fires on the next sweep */
+            srv->last_heartbeat = 0;
+        }
+        log_info("Management: server #%d master_broadcast set to %d",
+                 server_idx + 1, val);
     }
     else {
         send_error(client_fd, "unknown key");
@@ -587,6 +620,22 @@ static void handle_add_server(mgmt_state_t *state, int client_fd,
     if (json_find_string(json, "hostname_tag", tag, sizeof(tag)) && tag[0] != '\0')
         cfg.hostname_tag = strdup(tag);
 
+    /* Optional: master_server (HOST:PORT or HOST — sets one master) */
+    char master_str[256] = {0};
+    if (json_find_string(json, "master_server", master_str, sizeof(master_str)) &&
+        master_str[0] != '\0') {
+        if (resolve_host_port(master_str, Q3_DEFAULT_MASTER_PORT,
+                              &cfg.master_addrs[0], 0) == 0) {
+            cfg.master_count = 1;
+            cfg.heartbeat_enabled = 1;
+        }
+    }
+
+    /* Optional: master_broadcast (0 or 1, defaults to 1 if master set) */
+    int broadcast_val;
+    if (json_find_int(json, "master_broadcast", &broadcast_val))
+        cfg.heartbeat_enabled = (broadcast_val != 0) ? 1 : 0;
+
     int idx = relay_add_server(state->servers, &state->server_count,
                                state->dyn_cfgs, &cfg, state->epoll_fd);
     if (idx < 0) {
@@ -597,6 +646,61 @@ static void handle_add_server(mgmt_state_t *state, int client_fd,
     char data[64];
     snprintf(data, sizeof(data), "{\"index\":%d}", idx);
     send_ok(client_fd, data);
+}
+
+/*
+ * handle_set_master — Set or clear the master server for a specific server.
+ *
+ * Accepts "master_server" as a HOST:PORT string (sets one master) or
+ * an empty string (clears all masters).
+ */
+static void handle_set_master(mgmt_state_t *state, int client_fd,
+                               const char *json)
+{
+    int server_idx = -1;
+    if (!json_find_int(json, "server", &server_idx) ||
+        server_idx < 0 || server_idx >= RELAY_MAX_SERVERS ||
+        !state->servers[server_idx].active) {
+        send_error(client_fd, "invalid or missing 'server' index");
+        return;
+    }
+
+    char master_str[256] = {0};
+    if (!json_find_string(json, "master_server", master_str, sizeof(master_str))) {
+        send_error(client_fd, "missing 'master_server' field");
+        return;
+    }
+
+    server_instance_t *srv = &state->servers[server_idx];
+    relay_config_t *cfg = (relay_config_t *)srv->cfg;
+
+    if (master_str[0] == '\0') {
+        /* Clear all masters */
+        cfg->master_count = 0;
+        memset(cfg->master_addrs, 0, sizeof(cfg->master_addrs));
+        log_info("Management: server #%d master server(s) cleared",
+                 server_idx + 1);
+    } else {
+        /* Resolve and set as master_addrs[0] */
+        struct sockaddr_in resolved = {0};
+        if (resolve_host_port(master_str, Q3_DEFAULT_MASTER_PORT,
+                              &resolved, 0) < 0) {
+            send_error(client_fd, "cannot resolve master server address");
+            return;
+        }
+        cfg->master_addrs[0] = resolved;
+        cfg->master_count = 1;
+
+        char addr_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &resolved.sin_addr, addr_str, sizeof(addr_str));
+        log_info("Management: server #%d master server set to %s:%u",
+                 server_idx + 1, addr_str, ntohs(resolved.sin_port));
+
+        /* Trigger immediate heartbeat on next sweep */
+        srv->last_heartbeat = 0;
+    }
+
+    send_ok(client_fd, NULL);
 }
 
 /*
@@ -651,6 +755,8 @@ static void dispatch_command(mgmt_state_t *state, int client_fd,
         handle_add_server(state, client_fd, json);
     else if (strcmp(cmd, "remove_server") == 0)
         handle_remove_server(state, client_fd, json);
+    else if (strcmp(cmd, "set_master") == 0)
+        handle_set_master(state, client_fd, json);
     else
         send_error(client_fd, "unknown command");
 }

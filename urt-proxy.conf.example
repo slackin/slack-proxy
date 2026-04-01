@@ -56,6 +56,11 @@ query-timeout = 5
 # Supports HOST or HOST:PORT — port defaults to 27900
 master-server = master.urbanterror.info
 
+# Enable/disable heartbeat broadcast to master server(s) (default: true)
+# Set to false/no/0 to keep this server hidden from the master server list
+# while still having a master-server configured (can be toggled at runtime)
+master-broadcast = true
+
 [server:chicago]
 listen-port = 27991
 remote-host = 10.0.0.3
@@ -67,3 +72,5 @@ rate-limit = 5
 max-query-sessions = 100
 query-timeout = 5
 master-server = master.urbanterror.info
+# This server is hidden from the master server list
+master-broadcast = false

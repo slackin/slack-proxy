@@ -84,8 +84,8 @@ static char *trim(char *s)
  * @param line          Config file line number (for error messages).
  * @return              0 on success, -1 on error (message printed).
  */
-static int resolve_host_port(const char *str, uint16_t default_port,
-                             struct sockaddr_in *out, int line)
+int resolve_host_port(const char *str, uint16_t default_port,
+                      struct sockaddr_in *out, int line)
 {
     char host_buf[256];
     uint16_t port = default_port;
@@ -146,6 +146,7 @@ static void init_server_defaults(relay_config_t *cfg)
     cfg->max_new_per_sec   = DEFAULT_RATE_LIMIT;
     cfg->max_query_sessions = DEFAULT_MAX_QUERY;
     cfg->query_timeout     = DEFAULT_QUERY_TIMEOUT;
+    cfg->heartbeat_enabled = 1;  /* On by default; master-broadcast can override */
 }
 
 /* ------------------------------------------------------------------ */
@@ -257,6 +258,11 @@ static int apply_server_key(relay_config_t *cfg, const char *key,
                               &cfg->master_addrs[cfg->master_count], line) < 0)
             return -1;
         cfg->master_count++;
+    }
+    else if (strcmp(key, "master-broadcast") == 0) {
+        cfg->heartbeat_enabled = (strcmp(value, "true") == 0 ||
+                                  strcmp(value, "yes") == 0 ||
+                                  strcmp(value, "1") == 0);
     }
     else {
         fprintf(stderr, "Line %d: unknown key '%s'\n", line, key);

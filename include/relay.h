@@ -65,6 +65,7 @@ typedef struct {
     /* --- Master server registration --- */
     struct sockaddr_in  master_addrs[RELAY_MAX_MASTERS]; /* Resolved master server addresses */
     int                 master_count;    /* Number of configured masters (0 = no registration) */
+    int                 heartbeat_enabled; /* 1 = send heartbeats to masters, 0 = silent          */
 } relay_config_t;
 
 /*

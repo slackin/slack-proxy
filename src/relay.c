@@ -735,6 +735,7 @@ int relay_run(const relay_config_t *cfgs, int server_count,
             }
 
             if (srv->cfg->master_count > 0 &&
+                srv->cfg->heartbeat_enabled &&
                 now - srv->last_heartbeat >= Q3_HEARTBEAT_INTERVAL) {
                 send_heartbeats(srv->listen_fd, srv->cfg);
                 srv->last_heartbeat = now;

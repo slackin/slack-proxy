@@ -206,6 +206,37 @@ fn show_config(ui: &mut egui::Ui, srv: &ServerInfo) {
                         egui::RichText::new(&srv.hostname_tag).monospace(),
                     );
                     ui.end_row();
+
+                    ui.label("Master Server:");
+                    let master_text = if srv.master_servers.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        srv.master_servers.join(", ")
+                    };
+                    ui.label(
+                        egui::RichText::new(&master_text).monospace(),
+                    );
+                    ui.end_row();
+
+                    ui.label("Broadcasting:");
+                    if srv.master_broadcast && !srv.master_servers.is_empty() {
+                        ui.label(
+                            egui::RichText::new("● Yes")
+                                .color(egui::Color32::from_rgb(80, 200, 80))
+                                .strong(),
+                        );
+                    } else if srv.master_broadcast && srv.master_servers.is_empty() {
+                        ui.label(
+                            egui::RichText::new("○ Enabled (no master set)")
+                                .color(egui::Color32::from_rgb(180, 180, 80)),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("○ No")
+                                .color(egui::Color32::from_rgb(160, 160, 170)),
+                        );
+                    }
+                    ui.end_row();
                 });
         });
 }
@@ -292,6 +323,47 @@ fn show_tunables(
                                 "hostname_tag",
                                 serde_json::json!(val),
                             );
+                        }
+                        ui.end_row();
+                    }
+
+                    // Master Broadcast toggle
+                    ui.label("Master Broadcast:");
+                    let current_broadcast = srv.master_broadcast;
+                    let mut broadcast_val = current_broadcast;
+                    let broadcast_label = if broadcast_val { "On" } else { "Off" };
+                    if ui.checkbox(&mut broadcast_val, broadcast_label).changed() {
+                        app.send_set(
+                            proxy_id,
+                            srv_idx,
+                            "master_broadcast",
+                            serde_json::json!(if broadcast_val { 1 } else { 0 }),
+                        );
+                    }
+                    ui.label(""); // empty cell for 3-column grid
+                    ui.end_row();
+
+                    // Master Server
+                    let master_val = app
+                        .proxy_states
+                        .get_mut(&proxy_id)
+                        .and_then(|s| s.tune_values.get_mut(tab))
+                        .map(|tv| {
+                            tv.entry("master_server".to_string()).or_default();
+                            tv
+                        });
+
+                    if let Some(tv) = master_val {
+                        let master_entry = tv.get_mut("master_server").unwrap();
+                        ui.label("Master Server:");
+                        ui.add(
+                            egui::TextEdit::singleline(master_entry)
+                                .desired_width(220.0)
+                                .hint_text("host:port or empty to clear"),
+                        );
+                        if ui.button("Apply").clicked() {
+                            let val = master_entry.clone();
+                            app.send_set_master(proxy_id, srv_idx, &val);
                         }
                         ui.end_row();
                     }
@@ -564,6 +636,18 @@ fn show_add_server_modal(app: &mut App, ctx: &egui::Context, proxy_id: u64) {
                                 .hint_text("e.g. [PROXY]"),
                         );
                         ui.end_row();
+
+                        ui.label("Master Server:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.add_master_server)
+                                .desired_width(220.0)
+                                .hint_text("e.g. master.urbanterror.info:27900"),
+                        );
+                        ui.end_row();
+
+                        ui.label("Broadcast to Master:");
+                        ui.checkbox(&mut state.add_master_broadcast, "");
+                        ui.end_row();
                     });
             }
 
@@ -578,6 +662,8 @@ fn show_add_server_modal(app: &mut App, ctx: &egui::Context, proxy_id: u64) {
                         s.add_timeout.trim().parse::<i64>(),
                         s.add_remote_host.trim().to_string(),
                         s.add_hostname_tag.trim().to_string(),
+                        s.add_master_server.trim().to_string(),
+                        s.add_master_broadcast,
                     )
                 });
                 let ports: Vec<u16> = state
@@ -597,7 +683,7 @@ fn show_add_server_modal(app: &mut App, ctx: &egui::Context, proxy_id: u64) {
                     )
                     .clicked()
                 {
-                    if let Some((listen_port, remote_port, max_clients, timeout, remote_host, tag)) = form_data {
+                    if let Some((listen_port, remote_port, max_clients, timeout, remote_host, tag, master_server, master_broadcast)) = form_data {
                         if remote_host.is_empty() {
                             if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
                                 state.log("Remote host is required.");
@@ -630,9 +716,12 @@ fn show_add_server_modal(app: &mut App, ctx: &egui::Context, proxy_id: u64) {
                                     state.add_max_clients = "20".to_string();
                                     state.add_timeout = "30".to_string();
                                     state.add_hostname_tag = String::new();
+                                    state.add_master_server = String::new();
+                                    state.add_master_broadcast = true;
                                 }
                                 app.send_add_server(
                                     proxy_id, lp, &remote_host, rp, mc, to, &tag,
+                                    &master_server, master_broadcast,
                                 );
                             }
                         } else {

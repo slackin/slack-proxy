@@ -31,6 +31,8 @@ pub struct ProxyState {
     pub add_max_clients: String,
     pub add_timeout: String,
     pub add_hostname_tag: String,
+    pub add_master_server: String,
+    pub add_master_broadcast: bool,
     pub log_entries: VecDeque<(String, String)>,
     pub last_refresh: Option<Instant>,
 }
@@ -53,6 +55,8 @@ impl ProxyState {
             add_max_clients: "20".to_string(),
             add_timeout: "30".to_string(),
             add_hostname_tag: String::new(),
+            add_master_server: String::new(),
+            add_master_broadcast: true,
             log_entries: VecDeque::new(),
             last_refresh: None,
         }
@@ -242,6 +246,8 @@ impl App {
         max_clients: i64,
         session_timeout: i64,
         hostname_tag: &str,
+        master_server: &str,
+        master_broadcast: bool,
     ) {
         let mut payload = serde_json::json!({
             "cmd": "add_server",
@@ -254,6 +260,10 @@ impl App {
         if !hostname_tag.is_empty() {
             payload["hostname_tag"] = serde_json::json!(hostname_tag);
         }
+        if !master_server.is_empty() {
+            payload["master_server"] = serde_json::json!(master_server);
+        }
+        payload["master_broadcast"] = serde_json::json!(if master_broadcast { 1 } else { 0 });
         let _ = self.cmd_tx.send(Command::Send {
             proxy_id,
             cmd_name: "add_server".to_string(),
@@ -279,6 +289,26 @@ impl App {
         });
         if let Some(state) = self.proxy_states.get_mut(&proxy_id) {
             state.log(&format!("Removing server #{}", server + 1));
+        }
+    }
+
+    pub fn send_set_master(&mut self, proxy_id: u64, server: usize, master_server: &str) {
+        let payload = serde_json::json!({
+            "cmd": "set_master",
+            "server": server,
+            "master_server": master_server,
+        });
+        let _ = self.cmd_tx.send(Command::Send {
+            proxy_id,
+            cmd_name: "set_master".to_string(),
+            payload,
+        });
+        if let Some(state) = self.proxy_states.get_mut(&proxy_id) {
+            if master_server.is_empty() {
+                state.log(&format!("Clearing master server on server #{}", server + 1));
+            } else {
+                state.log(&format!("Setting master server to {} on server #{}", master_server, server + 1));
+            }
         }
     }
 
@@ -406,6 +436,14 @@ impl App {
                                     *v = srv.hostname_tag.clone();
                                 })
                                 .or_insert_with(|| srv.hostname_tag.clone());
+                            let master_str = srv.master_servers.first()
+                                .cloned()
+                                .unwrap_or_default();
+                            tv.entry("master_server".to_string())
+                                .and_modify(|v| {
+                                    *v = master_str.clone();
+                                })
+                                .or_insert_with(|| master_str);
                         }
 
                         state.server_data = status.servers;
@@ -424,7 +462,7 @@ impl App {
                     }
                 }
             }
-            "set" | "kick" | "kick_all" | "add_server" | "remove_server" => {
+            "set" | "kick" | "kick_all" | "add_server" | "remove_server" | "set_master" => {
                 state.log(&format!("{}: OK", cmd_name));
                 followup_status = true;
             }
