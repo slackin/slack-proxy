@@ -1,34 +1,98 @@
+<div align="center">
+
 # urt-proxy
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+**Transparent UDP proxy for Urban Terror that reduces latency via WireGuard tunneling**
 
-Transparent UDP proxy for Urban Terror (Quake 3 engine) that relays game traffic
-over a WireGuard tunnel to reduce latency by routing through a better network path.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Language: C11](https://img.shields.io/badge/Language-C11-orange.svg)](#build)
+[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](#prerequisites)
+[![Dependencies: None](https://img.shields.io/badge/Dependencies-None-green.svg)](#build)
+
+```
+                                    WireGuard Tunnel
+  ┌────────┐        ┌───────────┐ ═══════════════════ ┌──────────────┐
+  │ Player │──UDP──►│ urt-proxy │────── send() ──────►│  Real UrT    │
+  │        │◄──UDP──│  :27960   │◄───── recv() ───────│  Server      │
+  └────────┘        └─────┬─────┘ ═══════════════════ └──────────────┘
+                          │
+                     TCP :27961
+                          │
+                    ┌─────┴─────┐
+                    │  urt-mgmt │
+                    │  (GUI)    │
+                    └───────────┘
+```
+
+</div>
+
+> **Are you a player?** See the [Player's Guide](README-GAME-CLIENTS.md) — no install needed, just connect and play.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [How It Works](#how-it-works)
+- [Prerequisites](#prerequisites)
+- [Build](#build)
+- [Usage](#usage)
+  - [Single-Server CLI Mode](#single-server-cli-mode)
+  - [Multi-Server Config File Mode](#multi-server-config-file-mode)
+- [Log Output](#log-output)
+- [Remote Management](#remote-management)
+  - [Protocol](#protocol)
+  - [GUI Client](#gui-client)
+  - [Security Notes](#security-notes)
+- [Architecture](#architecture)
+  - [Project Structure](#project-structure)
+- [Systemd Service](#systemd-service-optional)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
 
 ## Features
 
-- **Transparent relay** — gameplay packets pass through unmodified; no Q3 protocol changes
-- **Server browser compatible** — responds to `getinfo`/`getstatus` queries, appears as a normal UrT server
-- **Hostname tagging** — optionally prepend a tag (e.g. `[PROXY]`) to `sv_hostname` so players can identify the proxy in the server list
-- **Multi-server support** — proxy multiple game servers from one process using an INI config file, each on a different port
-- **Per-client sessions** — each player gets a dedicated relay socket for proper bidirectional NAT
-- **Query session management** — browser queries and game sessions are tracked separately with independent limits and timeouts
-- **Remote management API** — TCP-based JSON management interface for monitoring and runtime tuning
-- **Management-only mode** — start with no servers configured, add them at runtime via the GUI client
-- **Auto-generated API key** — key is generated on first run, saved to a file, and reused on subsequent startups
-- **GUI management client** — modern Rust+egui GPU-rendered desktop client for remote proxy management
-- **Single-threaded epoll** — efficient event loop with no threads and no external dependencies
-- **Rate limiting** — caps new session creation to prevent abuse
-- **Master server heartbeat** — periodic registration with UrT master server(s) so the proxy appears in the server browser
-- **Automatic cleanup** — idle sessions are expired after a configurable timeout with per-session traffic statistics
-- **Graceful shutdown** — `SIGINT`/`SIGTERM` cleanly closes all sockets and frees resources
+🔀 **Transparent relay** — gameplay packets pass through unmodified; no Q3 protocol changes  
+🌐 **Server browser compatible** — responds to `getinfo`/`getstatus` queries, appears as a normal UrT server  
+🏷️ **Hostname tagging** — optionally prepend a tag (e.g. `[PROXY]`) to `sv_hostname` so players can identify the proxy  
+📡 **Multi-server support** — proxy up to 32 game servers from one process, each on a different port  
+🔌 **Per-client sessions** — each player gets a dedicated relay socket for proper bidirectional NAT  
+🔍 **Query session management** — browser queries and game sessions tracked separately with independent limits  
+🖥️ **Remote management API** — TCP-based JSON interface for monitoring and runtime tuning  
+🚀 **Management-only mode** — start with no servers, add them at runtime via the GUI  
+🔑 **Auto-generated API key** — key generated on first run, saved to file, reused automatically  
+🎨 **GUI management client** — modern Rust + egui GPU-rendered desktop client  
+⚡ **Single-threaded epoll** — efficient event loop with no threads and zero external dependencies  
+🛡️ **Rate limiting** — caps new session creation to prevent abuse  
+📋 **Master server heartbeat** — periodic registration so the proxy appears in the server browser  
+🧹 **Automatic cleanup** — idle sessions expired after configurable timeout with traffic statistics  
+🔄 **Graceful shutdown** — `SIGINT`/`SIGTERM` cleanly closes all sockets and frees resources
+
+---
+
+## Quick Start
+
+```bash
+# 1. Build
+make
+
+# 2. Run (single server — forwards to real server over WireGuard)
+./build/urt-proxy -r 10.0.0.2 -T "[US-EAST]" -M master.urbanterror.info
+
+# 3. (Optional) Launch the management GUI
+cd gui/urt-mgmt && cargo build --release
+./target/release/urt-mgmt
+```
+
+That's it. Players connect to your proxy's IP on port 27960 and play normally.
+
+---
 
 ## How It Works
-
-```
-Player ──UDP──► urt-proxy (:27960) ──WireGuard──► Real UrT Server
-       ◄──UDP──                    ◄──WireGuard──
-```
 
 The proxy binds a UDP port and appears as a normal Urban Terror server. When a player
 connects, the proxy creates a dedicated relay socket and forwards all packets to the
@@ -37,6 +101,18 @@ real server over the WireGuard interface. Responses are relayed back transparent
 Browser queries (`getinfo`/`getstatus`) from the master server or player server
 browsers are forwarded to the real server and the response is relayed back — with
 an optional hostname tag prepended so the proxy is identifiable in the server list.
+
+**Session lifecycle:**
+
+1. Player's first packet arrives on the listen socket
+2. Proxy creates a dedicated relay socket and `connect()`s it to the real server
+3. All subsequent packets from that player are forwarded via the relay socket
+4. Server responses arrive on the relay socket and are sent back to the player
+5. After a configurable idle timeout, the session is cleaned up and traffic stats are logged
+
+Query sessions (browser pings) are tracked separately and automatically **promoted** to full game sessions when the client sends a non-query packet like `getchallenge`.
+
+---
 
 ## Prerequisites
 
@@ -47,18 +123,13 @@ an optional hostname tag prepended so the proxy is identifiable in the server li
 ## Build
 
 ```bash
-make
-```
-
-Binary is produced at `build/urt-proxy`.
-
-To clean build artifacts:
-
-```bash
-make clean
+make                  # produces build/urt-proxy
+make clean            # removes build artifacts
 ```
 
 No external dependencies — only POSIX and standard C11 library.
+
+---
 
 ## Usage
 
@@ -171,6 +242,8 @@ master-server = master.urbanterror.info
 
 Each `[server:<name>]` section defines one proxied server. The only required key is `remote-host`; all others have the same defaults as the CLI flags. Up to 32 servers can be defined. Each must use a unique `listen-port`.
 
+---
+
 ## Log Output
 
 All logs go to stderr with timestamps and severity levels:
@@ -205,13 +278,15 @@ Rate limit, capacity, and query session warnings include the client address and 
 
 Enable debug logging with `-d` for verbose packet-level diagnostics (e.g. hostname rewrite events).
 
+---
+
 ## Remote Management
 
 urt-proxy includes a TCP-based management API for remote monitoring and runtime tuning. The management API is enabled automatically — on first run, a random API key is generated, saved to `.urt-proxy.key`, and displayed in the terminal. On subsequent runs the saved key is reused.
 
 You can also provide a key explicitly via `--mgmt-key` or specify a custom key file path with `--mgmt-key-file`.
 
-### Quick Start
+### Getting Started
 
 ```bash
 # Start proxy — API key auto-generated on first run
@@ -273,6 +348,8 @@ Features:
 - API key is transmitted in plaintext; use a VPN or SSH tunnel for remote management over untrusted networks
 - Maximum 4 concurrent management connections
 
+---
+
 ## Architecture
 
 - **Single-threaded epoll** event loop — handles all I/O without threads, multiplexed across all configured servers
@@ -309,7 +386,10 @@ gui/
   urt-mgmt/    Rust+egui GPU-rendered management GUI client (cargo project)
 ```
 
-## Systemd Service (optional)
+---
+
+<details>
+<summary><h2>Systemd Service (optional)</h2></summary>
 
 ### Single-Server
 
@@ -348,7 +428,10 @@ LimitNOFILE=4096
 WantedBy=multi-user.target
 ```
 
-## Troubleshooting
+</details>
+
+<details>
+<summary><h2>Troubleshooting</h2></summary>
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
@@ -365,10 +448,14 @@ WantedBy=multi-user.target
 | `servers #X and #Y both use listen-port Z` | Duplicate ports in config file | Give each server a unique `listen-port` |
 | `'x.x.x.x' is not a valid IPv4 address` | Non-IP passed to `-r` in CLI mode | Use a dotted-quad IPv4 address (e.g. `10.0.0.2`); for hostnames, use config file mode |
 
+</details>
+
+---
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, code style, and how to submit changes.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) — free for commercial and personal use.
