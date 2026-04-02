@@ -84,10 +84,6 @@ The improvement depends on network conditions and geography. Players who are far
 
 **No.** Everything works with your existing Urban Terror setup. No console commands, no config tweaks.
 
-### Is my connection secure?
-
-**Yes.** The traffic between the proxy and the real game server travels through an encrypted WireGuard tunnel. Your gameplay traffic is handled the same way as connecting to any other server.
-
 ### Will this increase my ping?
 
 **Usually the opposite.** The proxy is set up to route traffic through a faster network path. Most players see the same or lower ping. In rare cases where your default route is already optimal, you might see a very small increase (1–2ms) — but this is uncommon.
@@ -103,10 +99,6 @@ A VPN routes **all** your internet traffic through a different path. The proxy o
 ### The server name has a weird tag like `[US-EAST]` — what is that?
 
 That's the proxy's **hostname tag**. It's added so you can identify proxied servers in the browser. The actual server behind it is the same one you know — just reached through a faster route.
-
-### I'm getting disconnected / can't connect — what do I do?
-
-This is almost always a network issue on the server side, not something on your end. Contact your server admin or community. There's nothing you need to troubleshoot on your machine.
 
 ### Who runs the proxy?
 
