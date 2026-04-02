@@ -775,9 +775,6 @@ fn show_remove_confirm_modal(app: &mut App, ctx: &egui::Context, proxy_id: u64) 
                         app.send_remove_server(proxy_id, srv_idx);
                         if let Some(state) = app.proxy_states.get_mut(&proxy_id) {
                             state.confirm_remove = None;
-                            if state.active_tab > 0 {
-                                state.active_tab -= 1;
-                            }
                         }
                     }
                     if ui.button("Cancel").clicked() {

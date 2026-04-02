@@ -174,6 +174,24 @@ static void close_client(mgmt_state_t *state, int slot)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Config persistence helper                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * persist_config — Save the current server state to the config file.
+ *
+ * No-op if no config file path is set (CLI / management-only mode).
+ */
+static void persist_config(mgmt_state_t *state)
+{
+    if (!state->config_path)
+        return;
+    if (config_save(state->config_path, state->servers,
+                    state->dyn_cfgs, state->config) < 0)
+        log_warn("Failed to save config to %s", state->config_path);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Command handlers                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -430,6 +448,7 @@ static void handle_set(mgmt_state_t *state, int client_fd, const char *json)
     }
 
     send_ok(client_fd, NULL);
+    persist_config(state);
 }
 
 /*
@@ -646,6 +665,7 @@ static void handle_add_server(mgmt_state_t *state, int client_fd,
     char data[64];
     snprintf(data, sizeof(data), "{\"index\":%d}", idx);
     send_ok(client_fd, data);
+    persist_config(state);
 }
 
 /*
@@ -701,6 +721,7 @@ static void handle_set_master(mgmt_state_t *state, int client_fd,
     }
 
     send_ok(client_fd, NULL);
+    persist_config(state);
 }
 
 /*
@@ -724,6 +745,7 @@ static void handle_remove_server(mgmt_state_t *state, int client_fd,
     }
 
     send_ok(client_fd, NULL);
+    persist_config(state);
 }
 
 /* ------------------------------------------------------------------ */
@@ -825,7 +847,7 @@ static inline uint64_t pack_epoll_data(int server_index, int fd)
 
 int mgmt_init(mgmt_state_t *state, const mgmt_config_t *config,
               int epoll_fd, server_instance_t *servers, int server_count,
-              relay_config_t *dyn_cfgs)
+              relay_config_t *dyn_cfgs, const char *config_path)
 {
     memset(state, 0, sizeof(*state));
     state->listen_fd    = -1;
@@ -834,6 +856,7 @@ int mgmt_init(mgmt_state_t *state, const mgmt_config_t *config,
     state->servers      = servers;
     state->server_count = server_count;
     state->dyn_cfgs     = dyn_cfgs;
+    state->config_path  = config_path;
 
     for (int i = 0; i < MGMT_MAX_CLIENTS; i++)
         state->client_fds[i] = -1;

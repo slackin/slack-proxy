@@ -90,4 +90,20 @@ int config_load(const char *path, proxy_config_t *out);
 int resolve_host_port(const char *str, uint16_t default_port,
                       struct sockaddr_in *out, int line);
 
+/*
+ * config_save — Write the current active server configs to a config file.
+ *
+ * Reads the existing config file to preserve [global] settings and
+ * comments, then replaces all [server:*] sections with the current
+ * runtime state.  Uses atomic write (write to temp, then rename).
+ *
+ * @param path       Path to the config file.
+ * @param servers    Server instance array (only active entries are written).
+ * @param dyn_cfgs   Config array indexed by server slot.
+ * @param mgmt_cfg   Management config (for writing [global] mgmt keys).
+ * @return           0 on success, -1 on error (details logged).
+ */
+int config_save(const char *path, const server_instance_t *servers,
+                const relay_config_t *dyn_cfgs, const mgmt_config_t *mgmt_cfg);
+
 #endif

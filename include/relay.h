@@ -113,10 +113,11 @@ typedef struct server_instance server_instance_t;
  * @param cfgs          Array of fully-populated relay_config_t structs.
  * @param server_count  Number of entries in @a cfgs (1 or more).
  * @param mgmt_cfg      Management API config (NULL to disable).
+ * @param config_path   Path to the config file (NULL if CLI mode).
  * @return              0 on clean shutdown, -1 on fatal error.
  */
 int relay_run(const relay_config_t *cfgs, int server_count,
-              const mgmt_config_t *mgmt_cfg);
+              const mgmt_config_t *mgmt_cfg, const char *config_path);
 
 /*
  * relay_add_server — Dynamically add a new server at runtime.

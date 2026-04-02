@@ -31,6 +31,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 
@@ -472,5 +473,157 @@ int config_load(const char *path, proxy_config_t *out)
         }
     }
 
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Config file writer                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * write_global_from_existing — Extract and write the [global] section from
+ * the existing config file, preserving comments and formatting.
+ *
+ * Returns 1 if a [global] section was found and written, 0 otherwise.
+ */
+static int write_global_from_existing(FILE *out, const char *path)
+{
+    FILE *in = fopen(path, "r");
+    if (!in)
+        return 0;
+
+    char line_buf[MAX_LINE];
+    int in_global = 0;
+    int wrote_anything = 0;
+
+    while (fgets(line_buf, sizeof(line_buf), in)) {
+        /* Work on a copy for trimming; keep original for output */
+        char trim_buf[MAX_LINE];
+        strncpy(trim_buf, line_buf, sizeof(trim_buf) - 1);
+        trim_buf[sizeof(trim_buf) - 1] = '\0';
+        char *trimmed = trim(trim_buf);
+
+        /* Detect section boundaries */
+        if (trimmed[0] == '[') {
+            if (strncmp(trimmed, "[global]", 8) == 0) {
+                in_global = 1;
+                fprintf(out, "%s", line_buf);
+                wrote_anything = 1;
+                continue;
+            } else {
+                /* Hit a non-global section — stop copying */
+                if (in_global)
+                    break;
+                continue;
+            }
+        }
+
+        if (in_global) {
+            fprintf(out, "%s", line_buf);
+            wrote_anything = 1;
+        }
+    }
+
+    fclose(in);
+    return wrote_anything;
+}
+
+int config_save(const char *path, const server_instance_t *servers,
+                const relay_config_t *dyn_cfgs, const mgmt_config_t *mgmt_cfg)
+{
+    /* Build temp file path: <path>.tmp */
+    char tmp_path[1024];
+    int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    if (n < 0 || (size_t)n >= sizeof(tmp_path)) {
+        log_error("Config save: path too long");
+        return -1;
+    }
+
+    FILE *fp = fopen(tmp_path, "w");
+    if (!fp) {
+        log_error("Config save: cannot create '%s': %s",
+                  tmp_path, strerror(errno));
+        return -1;
+    }
+
+    fprintf(fp, "# urt-proxy configuration\n");
+    fprintf(fp, "# Auto-saved by management API\n\n");
+
+    /* Preserve existing [global] section if the file already exists */
+    if (!write_global_from_existing(fp, path)) {
+        /* No existing [global] section — write a minimal one */
+        fprintf(fp, "[global]\n");
+        if (mgmt_cfg && mgmt_cfg->port != 0 && mgmt_cfg->port != MGMT_DEFAULT_PORT)
+            fprintf(fp, "mgmt-port = %u\n", mgmt_cfg->port);
+        if (mgmt_cfg) {
+            char addr_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &mgmt_cfg->listen_addr.sin_addr,
+                      addr_str, sizeof(addr_str));
+            /* Only write mgmt-addr if it's not the default loopback */
+            uint32_t addr_host = ntohl(mgmt_cfg->listen_addr.sin_addr.s_addr);
+            if (addr_host != INADDR_LOOPBACK)
+                fprintf(fp, "mgmt-addr = %s\n", addr_str);
+        }
+    }
+    fprintf(fp, "\n");
+
+    /* Write each active server */
+    int server_num = 0;
+    for (int i = 0; i < RELAY_MAX_SERVERS; i++) {
+        if (!servers[i].active)
+            continue;
+
+        const relay_config_t *cfg = &dyn_cfgs[i];
+        server_num++;
+
+        char remote_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &cfg->remote_addr.sin_addr,
+                  remote_str, sizeof(remote_str));
+
+        fprintf(fp, "[server:srv%d]\n", server_num);
+        fprintf(fp, "listen-port = %u\n", cfg->listen_port);
+        fprintf(fp, "remote-host = %s\n", remote_str);
+        fprintf(fp, "remote-port = %u\n", ntohs(cfg->remote_addr.sin_port));
+        fprintf(fp, "max-clients = %d\n", cfg->max_clients);
+        fprintf(fp, "timeout = %d\n", cfg->session_timeout);
+
+        if (cfg->hostname_tag && cfg->hostname_tag[0] != '\0')
+            fprintf(fp, "hostname-tag = %s\n", cfg->hostname_tag);
+
+        fprintf(fp, "rate-limit = %d\n", cfg->max_new_per_sec);
+        fprintf(fp, "max-query-sessions = %d\n", cfg->max_query_sessions);
+        fprintf(fp, "query-timeout = %d\n", cfg->query_timeout);
+
+        for (int m = 0; m < cfg->master_count; m++) {
+            char master_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &cfg->master_addrs[m].sin_addr,
+                      master_str, sizeof(master_str));
+            fprintf(fp, "master-server = %s:%u\n",
+                    master_str, ntohs(cfg->master_addrs[m].sin_port));
+        }
+
+        fprintf(fp, "master-broadcast = %s\n",
+                cfg->heartbeat_enabled ? "true" : "false");
+        fprintf(fp, "\n");
+    }
+
+    if (fflush(fp) != 0 || ferror(fp)) {
+        log_error("Config save: write error on '%s': %s",
+                  tmp_path, strerror(errno));
+        fclose(fp);
+        unlink(tmp_path);
+        return -1;
+    }
+    fclose(fp);
+
+    /* Atomic replace: rename temp over the original */
+    if (rename(tmp_path, path) < 0) {
+        log_error("Config save: rename '%s' -> '%s' failed: %s",
+                  tmp_path, path, strerror(errno));
+        unlink(tmp_path);
+        return -1;
+    }
+
+    log_info("Config saved to %s (%d server(s))", path, server_num);
     return 0;
 }

@@ -403,7 +403,7 @@ static inline int unpack_fd(uint64_t data)
  *   5. On shutdown: close every open socket, free all maps.
  */
 int relay_run(const relay_config_t *cfgs, int server_count,
-              const mgmt_config_t *mgmt_cfg)
+              const mgmt_config_t *mgmt_cfg, const char *config_path)
 {
     /* --- Install SIGINT/SIGTERM handlers for graceful shutdown --- */
     struct sigaction sa = {0};
@@ -496,7 +496,7 @@ int relay_run(const relay_config_t *cfgs, int server_count,
     /* --- Initialise management API (if configured) --- */
     if (mgmt_cfg && mgmt_cfg->enabled) {
         if (mgmt_init(&mgmt_state, mgmt_cfg, epoll_fd,
-                      servers, init_count, dyn_cfgs) == 0)
+                      servers, init_count, dyn_cfgs, config_path) == 0)
             mgmt_active = 1;
         else
             log_warn("Management API failed to start — continuing without it");

@@ -24,6 +24,7 @@ pub struct ProxyState {
     pub selected_sessions: Vec<HashSet<String>>,
     pub confirm_kick_all: Option<usize>,
     pub confirm_remove: Option<usize>,
+    pub pending_remove: Option<usize>,
     pub show_add_server: bool,
     pub add_listen_port: String,
     pub add_remote_host: String,
@@ -48,6 +49,7 @@ impl ProxyState {
             selected_sessions: Vec::new(),
             confirm_kick_all: None,
             confirm_remove: None,
+            pending_remove: None,
             show_add_server: false,
             add_listen_port: "27990".to_string(),
             add_remote_host: String::new(),
@@ -288,6 +290,7 @@ impl App {
             payload,
         });
         if let Some(state) = self.proxy_states.get_mut(&proxy_id) {
+            state.pending_remove = Some(server);
             state.log(&format!("Removing server #{}", server + 1));
         }
     }
@@ -355,6 +358,7 @@ impl App {
                         state.session_data.clear();
                         state.tune_values.clear();
                         state.selected_sessions.clear();
+                        state.pending_remove = None;
                         state.active_tab = 0;
                         state.log(&msg);
                     }
@@ -377,6 +381,9 @@ impl App {
         };
 
         let Some(resp) = data else {
+            if cmd_name == "remove_server" {
+                state.pending_remove = None;
+            }
             state.log(&format!(
                 "No response for '{}' — connection lost?",
                 cmd_name
@@ -385,6 +392,9 @@ impl App {
         };
 
         if resp.get("ok").and_then(Value::as_bool) != Some(true) {
+            if cmd_name == "remove_server" {
+                state.pending_remove = None;
+            }
             let err = resp
                 .get("error")
                 .and_then(Value::as_str)
@@ -462,8 +472,23 @@ impl App {
                     }
                 }
             }
-            "set" | "kick" | "kick_all" | "add_server" | "remove_server" | "set_master" => {
+            "set" | "kick" | "kick_all" | "add_server" | "set_master" => {
                 state.log(&format!("{}: OK", cmd_name));
+                followup_status = true;
+            }
+            "remove_server" => {
+                state.log(&format!("{}: OK", cmd_name));
+                if let Some(removed_idx) = state.pending_remove.take() {
+                    state.server_data.retain(|s| s.index != removed_idx);
+                    state.session_data.remove(&removed_idx);
+                    state.tune_values.clear();
+                    state.selected_sessions.clear();
+                    if state.server_data.is_empty() {
+                        state.active_tab = 0;
+                    } else if state.active_tab >= state.server_data.len() {
+                        state.active_tab = state.server_data.len() - 1;
+                    }
+                }
                 followup_status = true;
             }
             _ => {}

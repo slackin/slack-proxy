@@ -97,6 +97,7 @@ typedef struct {
     server_instance_t   *servers;                           /* Game-server instance array  */
     int                  server_count;                      /* Number of active game servers */
     relay_config_t      *dyn_cfgs;                          /* Mutable config array (for add) */
+    const char          *config_path;                       /* Config file path (NULL if CLI) */
 } mgmt_state_t;
 
 /* ------------------------------------------------------------------ */
@@ -110,7 +111,7 @@ typedef struct {
  */
 int mgmt_init(mgmt_state_t *state, const mgmt_config_t *config,
               int epoll_fd, server_instance_t *servers, int server_count,
-              relay_config_t *dyn_cfgs);
+              relay_config_t *dyn_cfgs, const char *config_path);
 
 /*
  * mgmt_handle_event — Process an epoll event on a management fd.

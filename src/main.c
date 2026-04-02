@@ -486,7 +486,8 @@ int main(int argc, char **argv)
         }
 
         return relay_run(pcfg.servers, pcfg.server_count,
-                         pcfg.mgmt.enabled ? &pcfg.mgmt : NULL) == 0 ? 0 : 1;
+                         pcfg.mgmt.enabled ? &pcfg.mgmt : NULL,
+                         config_file) == 0 ? 0 : 1;
     }
 
     /* ================================================================ */
@@ -515,7 +516,7 @@ int main(int argc, char **argv)
         if (mgmt_cfg.listen_addr.sin_port == 0)
             mgmt_cfg.listen_addr.sin_port = htons(mgmt_cfg.port);
 
-        return relay_run(NULL, 0, &mgmt_cfg) == 0 ? 0 : 1;
+        return relay_run(NULL, 0, &mgmt_cfg, NULL) == 0 ? 0 : 1;
     }
 
     /* --remote-host is required in single-server mode */
@@ -600,5 +601,6 @@ int main(int argc, char **argv)
 
     /* Hand off to the blocking event loop — returns on shutdown or error */
     return relay_run(&cfg, 1,
-                     mgmt_cfg.enabled ? &mgmt_cfg : NULL) == 0 ? 0 : 1;
+                     mgmt_cfg.enabled ? &mgmt_cfg : NULL,
+                     NULL) == 0 ? 0 : 1;
 }
