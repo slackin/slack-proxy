@@ -1,0 +1,199 @@
+From: urt-proxy <urt-proxy@localhost>
+Subject: [PATCH] Add trusted proxy support: read real client IP from \realip\ userinfo key
+
+When a game server sits behind a UDP proxy (such as urt-proxy), the
+server only sees the proxy's ephemeral relay address as the client IP.
+This patch adds a sv_trustedProxies cvar (comma-separated list of
+trusted proxy IP addresses).  When a "connect" arrives from one of
+those addresses and the userinfo contains a \realip\ key, the engine:
+
+  1. Parses the real IP from the \realip\ value.
+  2. Stores it in the new client_t.realAddress field.
+  3. Uses it for the \ip\ userinfo key (visible to game modules).
+  4. Uses it for the SV_IsBanned() check.
+  5. Strips \realip\ from userinfo to prevent spoofing.
+
+Connections from non-trusted addresses always have \realip\ stripped
+and use the normal network address, so this is safe by default.
+
+Apply with:  patch -p1 < ioq3-realip.patch
+---
+ code/server/server.h    |  5 +++
+ code/server/sv_client.c | 83 +++++++++++++++++++++++++++++++++++++----
+ code/server/sv_init.c   |  1 +
+ code/server/sv_main.c   |  1 +
+ 4 files changed, 83 insertions(+), 7 deletions(-)
+
+diff --git a/code/server/server.h b/code/server/server.h
+--- a/code/server/server.h
++++ b/code/server/server.h
+@@ -236,6 +236,8 @@ typedef struct client_s {
+ 	int				oldServerTime;
+ 	qboolean		csUpdated[MAX_CONFIGSTRINGS];
+ 
++	netadr_t		realAddress;	// real client IP when connected through trusted proxy
++
+ #ifdef LEGACY_PROTOCOL
+ 	qboolean	compat;
+ #endif
+@@ -290,6 +292,9 @@ extern	cvar_t	*sv_strictAuth;
+ #endif
+ extern	cvar_t	*sv_banFile;
+ 
++extern	cvar_t	*sv_trustedProxies;
++
+ extern	serverBan_t serverBans[SERVER_MAXBANS];
+ extern	int serverBansCount;
+ 
+diff --git a/code/server/sv_main.c b/code/server/sv_main.c
+--- a/code/server/sv_main.c
++++ b/code/server/sv_main.c
+@@ -42,6 +42,7 @@ cvar_t	*sv_strictAuth;
+ #endif
+ cvar_t	*sv_banFile;
+ 
++cvar_t	*sv_trustedProxies;
+ 
+ serverBan_t serverBans[SERVER_MAXBANS];
+ int serverBansCount = 0;
+diff --git a/code/server/sv_init.c b/code/server/sv_init.c
+--- a/code/server/sv_init.c
++++ b/code/server/sv_init.c
+@@ -680,6 +680,7 @@ void SV_Init (void)
+ 
+ 	sv_banFile = Cvar_Get("sv_banFile", "serverbans.dat", CVAR_ARCHIVE);
+ 
++	sv_trustedProxies = Cvar_Get("sv_trustedProxies", "", CVAR_ARCHIVE);
+ 
+ 	// initialize bot cvars so that they are listed and can be set before loading the botlib
+ 	SV_BotInitCvars();
+diff --git a/code/server/sv_client.c b/code/server/sv_client.c
+--- a/code/server/sv_client.c
++++ b/code/server/sv_client.c
+@@ -220,6 +220,52 @@ static qboolean SV_IsBanned(netadr_t *from, qboolean isexception)
+ 	return qfalse;
+ }
+ 
++/*
++==================
++SV_IsTrustedProxy
++
++Check whether a certain address is a trusted proxy
++listed in the sv_trustedProxies cvar (comma-separated IPs).
++==================
++*/
++static qboolean SV_IsTrustedProxy(netadr_t *from)
++{
++	char		buf[MAX_INFO_STRING];
++	char		*p, *token;
++	netadr_t	proxyAddr;
++
++	if (!sv_trustedProxies || !sv_trustedProxies->string[0])
++		return qfalse;
++
++	Q_strncpyz(buf, sv_trustedProxies->string, sizeof(buf));
++
++	p = buf;
++	while (*p) {
++		// extract the next comma-separated token
++		token = p;
++		while (*p && *p != ',')
++			p++;
++		if (*p)
++			*p++ = '\0';
++
++		// skip leading whitespace
++		while (*token == ' ')
++			token++;
++
++		if (!*token)
++			continue;
++
++		if (NET_StringToAdr(token, &proxyAddr, NA_UNSPEC)) {
++			if (NET_CompareBaseAdr(*from, proxyAddr))
++				return qtrue;
++		}
++	}
++
++	return qfalse;
++}
++
+ /*
+ ==================
+ SV_DirectConnect
+@@ -235,6 +281,9 @@ void SV_DirectConnect( netadr_t from ) {
+ 	int			challenge;
+ 	char		*password;
+ 	int			startIndex;
++	netadr_t		realAddr;
++	qboolean		fromProxy = qfalse;
++	char		*realip;
+ 	intptr_t		denied;
+ 	int			count;
+ 	char		*ip;
+@@ -245,14 +294,24 @@ void SV_DirectConnect( netadr_t from ) {
+ 
+ 	Com_DPrintf ("SVC_DirectConnect ()\n");
+ 	
+-	// Check whether this client is banned.
+-	if(SV_IsBanned(&from, qfalse))
+-	{
+-		NET_OutOfBandPrint(NS_SERVER, from, "print\nYou are banned from this server.\n");
+-		return;
+-	}
+-
+ 	Q_strncpyz( userinfo, Cmd_Argv(1), sizeof(userinfo) );
++
++	// Check if this connection is from a trusted proxy and extract real IP
++	realip = Info_ValueForKey(userinfo, "realip");
++	if (SV_IsTrustedProxy(&from) && realip[0] &&
++		NET_StringToAdr(realip, &realAddr, NA_UNSPEC)) {
++		fromProxy = qtrue;
++		Com_Printf("Trusted proxy %s: real client IP %s\n",
++			NET_AdrToString(from), realip);
++	}
++	// Always strip realip from userinfo to prevent spoofing by non-proxied clients
++	Info_RemoveKey(userinfo, "realip");
++
++	// Check whether this client is banned (using real IP if proxied)
++	if(SV_IsBanned(fromProxy ? &realAddr : &from, qfalse))
++	{
++		NET_OutOfBandPrint(NS_SERVER, from, "print\nYou are banned from this server.\n");
++		return;
++	}
+ 
+ 	version = atoi(Info_ValueForKey(userinfo, "protocol"));
+ 	
+@@ -302,7 +361,9 @@ void SV_DirectConnect( netadr_t from ) {
+ 	
+ 	// don't let "ip" overflow userinfo string
+-	if ( NET_IsLocalAddress (from) )
++	if (fromProxy)
++		ip = (char *)NET_AdrToString( realAddr );
++	else if ( NET_IsLocalAddress (from) )
+ 		ip = "localhost";
+ 	else
+ 		ip = (char *)NET_AdrToString( from );
+@@ -380,6 +441,10 @@ gotnewcl:
+ 	// save the challenge
+ 	newcl->challenge = challenge;
+ 
++	// save the real client address if coming through a trusted proxy
++	if (fromProxy)
++		newcl->realAddress = realAddr;
++
+ 	// save the address
+ #ifdef LEGACY_PROTOCOL
+ 	newcl->compat = compat;
+@@ -908,7 +971,13 @@ void SV_UserinfoChanged( client_t *cl ) {
+ 	// TTimo
+ 	// maintain the IP information
+ 	// the banning code relies on this being consistently present
+-	if( NET_IsLocalAddress(cl->netchan.remoteAddress) )
++	// If the client connected through a trusted proxy, use the real address
++	if( cl->realAddress.type != NA_BAD )
++		ip = (char*)NET_AdrToString( cl->realAddress );
++	else if( NET_IsLocalAddress(cl->netchan.remoteAddress) )
+ 		ip = "localhost";
+ 	else
+ 		ip = (char*)NET_AdrToString( cl->netchan.remoteAddress );

@@ -22,6 +22,8 @@
 
 #include "q3proto.h"
 #include <string.h>
+#include <stdio.h>
+#include <arpa/inet.h>
 
 /*
  * q3_is_connectionless — Check if a packet starts with the OOB marker.
@@ -206,4 +208,122 @@ int q3_is_query(const uint8_t *data, size_t len)
         return 1;
 
     return 0;
+}
+
+/*
+ * q3_is_connect — Test whether a packet is a "connect" command.
+ *
+ * Matches only the connectionless "connect" command sent by clients.
+ */
+int q3_is_connect(const uint8_t *data, size_t len)
+{
+    size_t cmd_len;
+    const char *cmd = q3_connectionless_cmd(data, len, &cmd_len);
+    if (!cmd)
+        return 0;
+
+    return (cmd_len == 7 && memcmp(cmd, "connect", 7) == 0);
+}
+
+/*
+ * q3_inject_realip — Inject \realip\<ip:port> into a connect packet.
+ *
+ * The Q3 connect packet has the format:
+ *
+ *   \xFF\xFF\xFF\xFFconnect "\\key1\\val1\\key2\\val2\\..."
+ *
+ * or without quotes:
+ *
+ *   \xFF\xFF\xFF\xFFconnect \\key1\\val1\\key2\\val2\\...
+ *
+ * This function locates the end of the userinfo string (just before a
+ * closing quote or at the end of the packet) and inserts the key-value
+ * pair \realip\<ip:port>.  The result is written to the output buffer.
+ */
+size_t q3_inject_realip(const uint8_t *data, size_t len,
+                        uint8_t *out, size_t out_cap,
+                        const struct sockaddr_in *client_addr)
+{
+    if (!q3_is_connect(data, len))
+        return 0;
+
+    /* Format the real IP string: "\\realip\\1.2.3.4:12345" */
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr->sin_addr, ip_str, sizeof(ip_str));
+
+    char realip_kv[64];
+    int kv_len = snprintf(realip_kv, sizeof(realip_kv),
+                          "\\realip\\%s:%u",
+                          ip_str, ntohs(client_addr->sin_port));
+    if (kv_len < 0 || (size_t)kv_len >= sizeof(realip_kv))
+        return 0;
+
+    /*
+     * Find the userinfo string.  After the OOB marker and "connect ",
+     * the userinfo may optionally be wrapped in double quotes.
+     *
+     * Scan past: \xFF\xFF\xFF\xFF  "connect"  " "
+     */
+    const char *p = (const char *)data + 4; /* skip OOB marker */
+    size_t remain = len - 4;
+
+    /* Skip "connect" */
+    while (remain > 0 && *p != ' ' && *p != '\n') { p++; remain--; }
+    /* Skip whitespace after "connect" */
+    while (remain > 0 && *p == ' ') { p++; remain--; }
+
+    if (remain == 0)
+        return 0;
+
+    /*
+     * Determine if the userinfo is quoted and find the insertion point.
+     * We insert our key-value pair just before the closing quote (if
+     * quoted) or at the end of the packet data.
+     */
+    int quoted = (*p == '"');
+    size_t info_start = (size_t)(p - (const char *)data);
+
+    /* Find insertion point — end of the userinfo string */
+    size_t insert_offset;
+
+    if (quoted) {
+        /* Look for the closing quote */
+        const char *close_quote = NULL;
+        for (size_t i = info_start + 1; i < len; i++) {
+            if (data[i] == '"') {
+                close_quote = (const char *)data + i;
+                break;
+            }
+        }
+        if (close_quote)
+            insert_offset = (size_t)(close_quote - (const char *)data);
+        else
+            insert_offset = len; /* No closing quote — append at end */
+    } else {
+        /* Unquoted: insert at end, but before any trailing newline/NUL */
+        insert_offset = len;
+        while (insert_offset > info_start &&
+               (data[insert_offset - 1] == '\n' ||
+                data[insert_offset - 1] == '\0')) {
+            insert_offset--;
+        }
+    }
+
+    /* Compute new packet length */
+    size_t new_len = len + (size_t)kv_len;
+    if (new_len > out_cap || new_len > Q3_MAX_PACKET_SIZE)
+        return 0;
+
+    /* Build the output packet:
+     *   1. Everything before the insertion point
+     *   2. The \realip\ip:port key-value pair
+     *   3. Everything from the insertion point onward (closing quote, etc.)
+     */
+    memcpy(out, data, insert_offset);
+    memcpy(out + insert_offset, realip_kv, (size_t)kv_len);
+    memcpy(out + insert_offset + (size_t)kv_len,
+           data + insert_offset,
+           len - insert_offset);
+
+    return new_len;
 }

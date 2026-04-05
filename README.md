@@ -27,6 +27,8 @@
 </div>
 
 > **Are you a player?** See the [Player's Guide](README-GAME-CLIENTS.md) — no install needed, just connect and play.
+>
+> **Running a game server behind the proxy?** See the [Server Patch Guide](README-SERVER-PATCH.md) — apply a small engine patch so your server sees real player IPs.
 
 ---
 

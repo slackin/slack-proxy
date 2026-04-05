@@ -23,6 +23,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <netinet/in.h>
 
 /* Connectionless (OOB) marker: first 4 bytes of the packet are 0xFF. */
 #define Q3_CONNECTIONLESS_MARKER 0xFFFFFFFF
@@ -105,5 +106,43 @@ size_t q3_rewrite_hostname(const uint8_t *data, size_t len,
  * @return      Non-zero if the packet is a browser query, 0 otherwise.
  */
 int q3_is_query(const uint8_t *data, size_t len);
+
+/*
+ * q3_is_connect — Test whether a packet is a "connect" command.
+ *
+ * Returns non-zero if the packet is a connectionless "connect" command,
+ * which is sent by a client to join a server.
+ *
+ * @param data  Raw packet data.
+ * @param len   Length of the packet in bytes.
+ * @return      Non-zero if the packet is a connect command, 0 otherwise.
+ */
+int q3_is_connect(const uint8_t *data, size_t len);
+
+/*
+ * q3_inject_realip — Inject the real client IP into a connect packet.
+ *
+ * Parses a Q3 "connect" OOB packet, locates the userinfo string, and
+ * injects a \realip\<ip:port> key-value pair so the game server can
+ * identify the player's true address when behind a proxy.
+ *
+ * Connect packet format:
+ *   \xFF\xFF\xFF\xFFconnect "\\key1\\val1\\key2\\val2\\..."
+ *
+ * The modified packet is written to @a out with the realip key appended
+ * inside the userinfo string (before the closing quote, if present).
+ *
+ * @param data       Original connect packet data.
+ * @param len        Original packet length.
+ * @param out        Output buffer for the modified packet.
+ * @param out_cap    Size of the output buffer.
+ * @param client_addr  The real client address (IP + port).
+ * @return           Length of the modified packet in @a out, or 0 if no
+ *                   injection was performed (not a connect packet, or
+ *                   output buffer too small).
+ */
+size_t q3_inject_realip(const uint8_t *data, size_t len,
+                        uint8_t *out, size_t out_cap,
+                        const struct sockaddr_in *client_addr);
 
 #endif

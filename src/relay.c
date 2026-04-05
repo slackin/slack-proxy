@@ -668,7 +668,36 @@ int relay_run(const relay_config_t *cfgs, int server_count,
                 sess->last_activity = now;
                 sess->pkts_to_server++;
                 sess->bytes_to_server += (uint64_t)n;
-                send(sess->relay_fd, recv_buf, (size_t)n, 0);
+
+                /*
+                 * Real IP injection: when the client sends a "connect"
+                 * packet, inject the player's real IP address into the
+                 * userinfo string as \realip\<ip:port>.  This allows a
+                 * patched game server to identify the player's true
+                 * address instead of seeing the proxy's relay address.
+                 */
+                const uint8_t *fwd_data = recv_buf;
+                size_t fwd_len = (size_t)n;
+
+                if (q3_is_connect(recv_buf, (size_t)n)) {
+                    size_t injected_len = q3_inject_realip(
+                        recv_buf, (size_t)n,
+                        rewrite_buf, sizeof(rewrite_buf),
+                        &sess->client_addr);
+                    if (injected_len > 0) {
+                        fwd_data = rewrite_buf;
+                        fwd_len  = injected_len;
+                        char addr_str[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &sess->client_addr.sin_addr,
+                                  addr_str, sizeof(addr_str));
+                        log_info("Server #%d: injected realip %s:%u "
+                                 "into connect packet",
+                                 srv_idx + 1, addr_str,
+                                 ntohs(sess->client_addr.sin_port));
+                    }
+                }
+
+                send(sess->relay_fd, fwd_data, fwd_len, 0);
 
             } else {
                 /* ================================================== */
